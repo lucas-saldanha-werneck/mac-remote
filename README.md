@@ -12,7 +12,7 @@ Read this before you install.
 - Claude can read the password source you configure. mac-remote keeps the password out of the conversation: it never prints it, logs it, writes it to disk, pastes it, or puts it on a command line. But Claude could run the same password command itself. The plugin does not stop that.
 - While mac-remote holds the session, the Mac is unlocked. Anyone at your desk can use it.
 - Screenshots are saved to disk (in a folder only your user can read) and may show private things on your screen.
-- `restart --yes` restarts the Mac right away. Unsaved work in open apps can be lost, and apps may hold the restart with a "save changes?" dialog.
+- `restart --yes` restarts the Mac right away. Apps are not asked to save first (both `fdesetup authrestart` and `shutdown -r now` go through `shutdown`), so unsaved work in open apps is lost.
 - Several wrong passwords in a row can lock your macOS account. `unlock` tries twice and then stops.
 
 Use it only on a Mac you own, in a place you trust, and only if you are fine with an AI agent operating it.
@@ -45,6 +45,7 @@ A typical session is `status`, `unlock`, `shot`, `click 812 440`, `shot`, `lock`
 ```
 FileVault: on; authenticated restart supported (the disk unlocks once at the next boot)
 password: accepted by sudo for you
+FileVault user: you is enabled
 pre-restart command: none
 dry-run: everything is ready; not restarting. `mac-remote restart --yes` restarts.
 ```
@@ -134,9 +135,10 @@ In order, it:
 
 1. Reads the FileVault state (`fdesetup isactive`). With FileVault on, it refuses if `fdesetup supportsauthrestart` is not `true`.
 2. Refuses if `MAC_REMOTE_USER` is not the user running mac-remote (sudo needs that user's password), or if someone used the Mac in the last 20 seconds (unless `--force`).
-3. Gets the password from `MAC_REMOTE_PASS_CMD` (or `MAC_REMOTE_PASS`) and checks it with `sudo -S -k -v`. The password goes to sudo on stdin.
-4. `--dry-run` stops here, drops the sudo ticket (`sudo -k`) and says whether everything is ready.
-5. `--yes` runs `MAC_REMOTE_RESTART_PRE_CMD` if set (a failure stops the restart), then runs `sudo -n fdesetup authrestart -inputplist`, with the user name and password in a property list on stdin. With FileVault off: `sudo -n shutdown -r now`.
+3. Gets the password from `MAC_REMOTE_PASS_CMD` (or `MAC_REMOTE_PASS`), drops any old sudo ticket (`sudo -k`) and checks the password with `sudo -S -v`. The password goes to sudo on stdin. With FileVault on, it refuses if your user is not in `sudo -n fdesetup list`.
+4. `--dry-run` stops here and says whether everything is ready.
+5. `--yes` runs `MAC_REMOTE_RESTART_PRE_CMD` if set, with no sudo ticket while it runs (a failure stops the restart, and the end of its error output goes to `restart.log`), then checks the password with sudo again. It checks once more that nobody is using the Mac (unless `--force`), then runs `sudo -n fdesetup authrestart -inputplist`, with the user name and password in a property list on stdin. With FileVault off: `sudo -n shutdown -r now`.
+6. Whatever happens, it drops the sudo ticket (`sudo -k`) at the end.
 
 Per `man fdesetup`, FileVault protections are reduced until that next boot: an unlock key is kept in memory (and, on supported systems, the System Management Controller) until the disk is unlocked.
 
