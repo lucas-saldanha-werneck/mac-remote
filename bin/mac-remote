@@ -1,0 +1,37 @@
+#!/bin/bash
+# mac-remote: see and control this Mac through its own Screen Sharing (VNC), also when locked.
+# This wrapper only picks a Python and runs lib/mac_remote.py. `mac-remote setup` creates the
+# virtualenv with the Python dependencies. The password is never handled here.
+set -u
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP="$ROOT/lib/mac_remote.py"
+DATA="${MAC_REMOTE_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mac-remote}"
+VENV="$DATA/.venv"
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "mac-remote: macOS only (it drives macOS Screen Sharing)." >&2
+  exit 1
+fi
+
+if [ "${1:-}" = "setup" ]; then
+  BASE="${MAC_REMOTE_PYTHON:-python3}"
+  mkdir -p "$DATA" && chmod 700 "$DATA" || exit 1
+  if [ ! -x "$VENV/bin/python" ]; then
+    echo "creating virtualenv in $VENV"
+    "$BASE" -m venv "$VENV" || exit 1
+  fi
+  "$VENV/bin/python" -m pip install --quiet --upgrade pip || exit 1
+  "$VENV/bin/python" -m pip install --quiet -r "$ROOT/requirements.txt" || exit 1
+  "$VENV/bin/python" -c "import asyncvnc, PIL, Quartz" || exit 1
+  echo "mac-remote: setup ok ($VENV)"
+  exit 0
+fi
+
+if [ -n "${MAC_REMOTE_PYTHON:-}" ]; then
+  PY="$MAC_REMOTE_PYTHON"
+elif [ -x "$VENV/bin/python" ]; then
+  PY="$VENV/bin/python"
+else
+  PY="python3"
+fi
+exec "$PY" "$APP" "$@"

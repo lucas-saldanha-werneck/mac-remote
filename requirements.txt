@@ -1,0 +1,4 @@
+# mac-remote uses some asyncvnc internals, so asyncvnc is pinned to the tested version.
+asyncvnc==1.3.0
+pillow>=10
+pyobjc-framework-Quartz>=10

@@ -1,0 +1,15 @@
+{
+  "name": "mac-remote",
+  "description": "Let Claude see and control your Mac through macOS Screen Sharing, even when the screen is locked.",
+  "owner": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "plugins": [
+    {
+      "name": "mac-remote",
+      "source": "./",
+      "description": "Lets Claude see and control your Mac through macOS Screen Sharing (VNC), even when the screen is locked: unlock, screenshot, click, type, lock again."
+    }
+  ]
+}

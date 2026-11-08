@@ -1,0 +1,19 @@
+{
+  "name": "mac-remote",
+  "version": "0.1.0",
+  "description": "Lets Claude see and control your Mac through macOS Screen Sharing (VNC), even when the screen is locked: unlock, screenshot, click, type, lock again.",
+  "author": {
+    "name": "Lucas Saldanha Werneck",
+    "url": "https://github.com/lucas-saldanha-werneck"
+  },
+  "homepage": "https://github.com/lucas-saldanha-werneck/mac-remote",
+  "repository": "https://github.com/lucas-saldanha-werneck/mac-remote",
+  "license": "MIT",
+  "keywords": [
+    "macos",
+    "vnc",
+    "screen-sharing",
+    "remote-control",
+    "lock-screen"
+  ]
+}
