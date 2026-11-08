@@ -19,7 +19,33 @@ CONFIG = os.path.expanduser(os.environ.get('MAC_REMOTE_CONFIG') or os.path.join(
 STATE = os.path.join(HOME, 'state.json')            # {"last_input": t} of OUR injected input
 LAST_SHOT = os.path.join(HOME, 'last-shot.json')
 SHOT_DIR = os.path.join(HOME, 'shots')
-SOCK = os.path.join(HOME, 'holder.sock')
+
+
+def sock_path(home):
+    """holder.sock in HOME, unless that path is too long for a Unix socket (about 104 bytes on
+    macOS); then a private folder in /tmp, mode 700, checked before use (see ensure_sock_dir)."""
+    p = os.path.join(home, 'holder.sock')
+    if len(os.fsencode(p)) <= 100:
+        return p
+    return os.path.join('/tmp', f'mac-remote-{os.getuid()}', 'holder.sock')
+
+
+def ensure_sock_dir():
+    """Create the socket folder if needed; refuse a folder another user owns or others can open."""
+    d = os.path.dirname(SOCK)
+    if d == HOME:
+        return
+    try:
+        os.mkdir(d, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(d)
+    import stat as _stat
+    if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise Fail(f'{d} is not a private folder owned by you; remove it or set a shorter MAC_REMOTE_HOME')
+
+
+SOCK = sock_path(HOME)
 HOLDER_JSON = os.path.join(HOME, 'holder.json')
 HOLDER_LOG = os.path.join(HOME, 'holder.log')
 HOLDER_LOCK = os.path.join(HOME, 'holder.lock')
@@ -126,7 +152,8 @@ def frontmost():
     try:
         asn = subprocess.run(['lsappinfo', 'front'], capture_output=True, text=True, timeout=3).stdout.strip()
         out = subprocess.run(['lsappinfo', 'info', '-only', 'name', asn], capture_output=True, text=True, timeout=3).stdout
-        m = re.search(r'"LSDisplayName"="([^"]*)"', out)
+        # Older macOS prints "LSDisplayName"="Name"; newer prints "Name" ASN:0x0-0x...: (in front)
+        m = re.search(r'"LSDisplayName"="([^"]*)"', out) or re.search(r'^\s*"([^"]*)"\s+ASN:', out, re.M)
         return m.group(1) if m else None
     except Exception:
         return None
@@ -687,6 +714,7 @@ class Holder:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             loop.add_signal_handler(sig, self.stop, f'signal {signal.Signals(sig).name}')
+        ensure_sock_dir()
         rm(SOCK)
         old = os.umask(0o177)
         try:

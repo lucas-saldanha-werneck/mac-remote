@@ -143,11 +143,12 @@ Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.c
 
 ## Limits and what was not tested
 
-- Tests in `tests/` replace the VNC connection with fakes and never touch the screen: `python3 tests/test_mac_remote.py`. Unlock, click and type on a real Mac were tested by the author with the earlier private version of this tool, not re-run for this release.
+- Tests in `tests/` replace the VNC connection with fakes and never touch the screen: `python3 tests/test_mac_remote.py`. This release was also run on a real Mac (macOS 27, Apple silicon, U.S. International layout): `status` and `shot` on the locked screen, `unlock` (11 s), `shot`, `click`, `type` key by key, `type` by paste with `' " ~ ^`, `keys`, and `lock` (the Mac re-locked in about 1 to 2 s).
 - The tests ran on one Mac with Python 3.14 and 3.15. Other macOS versions, Intel Macs and setups with several users were not tested.
+- If `MAC_REMOTE_HOME` makes the socket path longer than a Unix socket allows (about 104 bytes on macOS), the socket goes to `/tmp/mac-remote-<uid>/` instead, a folder that must be yours with mode 700.
 - Not tested: the holder rejecting a socket client from another user (only reading the peer's user id was tested), and a real VNC drop in the middle of a held session.
 - Passwords with characters VNC cannot type are refused at unlock time. So are passwords with `' " ` ~ ^` when the selected keyboard layout has dead keys (U.S. International, ABNT and similar), because typed key by key those characters can change or vanish and cause two wrong attempts. mac-remote reads your selected layout, not the lock screen's; see `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD`.
-- Clipboard save and restore was tested with fakes and with a private pasteboard, not with the real clipboard. Data that an app only provides on request (some promised files) may not come back.
+- Clipboard save and restore was tested live with text only (the text came back after a paste); images and files were tested with fakes and a private pasteboard. Data that an app only provides on request (some promised files) may not come back.
 - Not tested in the Claude desktop app or on claude.ai. Per the Claude Code docs, claude.ai and Cowork do not install plugins that have a top-level `bin/` folder.
 
 ## License

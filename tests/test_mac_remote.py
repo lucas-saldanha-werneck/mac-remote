@@ -310,6 +310,40 @@ class HolderSocket(unittest.TestCase):
         self.assertIsNone(mr.holder_call({'cmd': 'ping'}))
         self.assertFalse(os.path.exists(mr.SOCK))
 
+    def test_long_home_gets_a_short_socket_path(self):
+        # Found live: a long MAC_REMOTE_HOME made the holder die with "AF_UNIX path too long".
+        long_home = '/private/tmp/' + 'x' * 120
+        p = mr.sock_path(long_home)
+        self.assertLessEqual(len(os.fsencode(p)), 100)
+        self.assertEqual(p, f'/tmp/mac-remote-{os.getuid()}/holder.sock')
+        self.assertEqual(mr.sock_path('/short'), '/short/holder.sock')
+
+    def test_socket_folder_open_to_others_is_refused(self):
+        d = tempfile.mkdtemp()
+        os.chmod(d, 0o755)
+        with mock.patch.object(mr, 'SOCK', os.path.join(d, 'holder.sock')):
+            with self.assertRaises(mr.Fail):
+                mr.ensure_sock_dir()
+            os.chmod(d, 0o700)
+            mr.ensure_sock_dir()            # private folder: accepted
+
+
+class Frontmost(unittest.TestCase):
+    """Found live on macOS 27: lsappinfo prints '"Name" ASN:...' instead of '"LSDisplayName"="Name"'."""
+    def run_with(self, info):
+        outs = iter([types.SimpleNamespace(stdout='ASN:0x0-0x2fb2fb:\n'), types.SimpleNamespace(stdout=info)])
+        with mock.patch.object(mr.subprocess, 'run', side_effect=lambda *a, **k: next(outs)):
+            return mr.frontmost()
+
+    def test_new_lsappinfo_format(self):
+        self.assertEqual(self.run_with('"TextEdit" ASN:0x0-0x2fb2fb: (in front) \n    bundleID=[ NULL ] \n'), 'TextEdit')
+
+    def test_old_lsappinfo_format(self):
+        self.assertEqual(self.run_with('"LSDisplayName"="Google Chrome"\n'), 'Google Chrome')
+
+    def test_unknown_format_is_none(self):
+        self.assertIsNone(self.run_with('nothing useful\n'))
+
 
 class FakeItem:
     """Stand-in for NSPasteboardItem: an ordered list of (type, data)."""
