@@ -116,6 +116,11 @@ class PasswordSource(unittest.TestCase):
         self.assertEqual(mr.pass_source(), 'command')
         self.assertEqual(mr.get_password(), SECRET)
 
+    def test_only_the_first_line_is_the_password(self):
+        # pass and gopass print the password, then other fields of the entry
+        os.environ['MAC_REMOTE_PASS_CMD'] = f"printf '{SECRET}\\nurl: example.com\\nuser: me\\n'"
+        self.assertEqual(mr.get_password(), SECRET)
+
     def test_env_password_wins(self):
         write_config("MAC_REMOTE_PASS_CMD=printf other\n")
         os.environ['MAC_REMOTE_PASS'] = SECRET
