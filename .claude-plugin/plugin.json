@@ -1,6 +1,6 @@
 {
   "name": "mac-remote",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Lets Claude see and control your Mac through macOS Screen Sharing (VNC), even when the screen is locked: unlock, screenshot, click, type, lock again.",
   "author": {
     "name": "Lucas Saldanha Werneck",

@@ -226,7 +226,8 @@ def get_password():
     if r.returncode != 0:
         raise Fail(f'MAC_REMOTE_PASS_CMD failed (exit {r.returncode}); run it yourself in a terminal '
                    'to see why (its output is hidden here on purpose)')
-    p = r.stdout.decode('utf-8', 'replace').rstrip('\r\n')
+    lines = r.stdout.decode('utf-8', 'replace').splitlines()
+    p = lines[0] if lines else ''   # first line only: some managers (pass, gopass show) print more
     if not p:
         raise Fail('MAC_REMOTE_PASS_CMD printed nothing')
     return p

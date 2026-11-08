@@ -77,7 +77,15 @@ Examples:
 |---|---|---|
 | macOS Keychain | `security add-generic-password -a "$USER" -s mac-remote -w` (prompts for the password) | `security find-generic-password -a "$USER" -s mac-remote -w` |
 | 1Password CLI | save a login item in 1Password, then copy the secret reference of its password field | `op read "<secret reference>"` |
-| Any other manager | | any command that prints only the password |
+| Bitwarden (`bw`) | save a login item | `bw get password "<item>"` (needs `BW_SESSION` from `bw unlock`) |
+| Bitwarden (`rbw`) | save a login item | `rbw get "<item>"` |
+| LastPass | save a site item | `lpass show --password "<item>"` |
+| Dashlane | save a login item | `dcli read "dl://<item>/password"` |
+| Keeper | save a record | `keeper find-password "<record UID or title>"` |
+| pass / gopass | `pass insert <item>` / `gopass insert <item>` | `pass show <item>` / `gopass show <item> --password` |
+| Any other manager | | any command that prints the password on its first line |
+
+The manager must already be unlocked: the command runs with no input, so it cannot ask for a master password (KeePassXC's `keepassxc-cli`, for example, only works with a key file). These commands come from each manager's documentation and were run with the author's handoff-terminal plugin, not with mac-remote; mac-remote was run live with 1Password.
 
 The command runs with a shell, only when a new VNC login is needed. Its output is captured and its error output is discarded, so nothing it prints reaches Claude. If it fails, mac-remote only reports the exit code; run the command yourself to see why.
 
