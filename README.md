@@ -2,7 +2,7 @@
 
 A Claude Code plugin that lets Claude see and control your Mac through macOS's own Screen Sharing (VNC), even when the screen is locked. It is meant for when you are away from the Mac (for example on your phone with Remote Control) and a task is stuck on a popup, a dialog or an app that needs a click.
 
-Claude can unlock the screen with your Mac password, take screenshots, click, type and press keys, then lock the screen again.
+Claude can unlock the screen with your Mac password, take screenshots, click, type and press keys, then lock the screen again. It can also restart the Mac without it stopping at the FileVault disk password screen (`mac-remote restart`).
 
 ## Warning: this gives Claude full control of your Mac
 
@@ -12,6 +12,7 @@ Read this before you install.
 - Claude can read the password source you configure. mac-remote keeps the password out of the conversation: it never prints it, logs it, writes it to disk, pastes it, or puts it on a command line. But Claude could run the same password command itself. The plugin does not stop that.
 - While mac-remote holds the session, the Mac is unlocked. Anyone at your desk can use it.
 - Screenshots are saved to disk (in a folder only your user can read) and may show private things on your screen.
+- `restart --yes` restarts the Mac right away. Unsaved work in open apps can be lost, and apps may hold the restart with a "save changes?" dialog.
 - Several wrong passwords in a row can lock your macOS account. `unlock` tries twice and then stops.
 
 Use it only on a Mac you own, in a place you trust, and only if you are fine with an AI agent operating it.
@@ -38,6 +39,15 @@ click X Y uses this image's pixel coordinates
 ```
 
 A typical session is `status`, `unlock`, `shot`, `click 812 440`, `shot`, `lock`.
+
+`mac-remote restart --dry-run` (FileVault on; output from the tests, with fake `fdesetup` and `sudo`):
+
+```
+FileVault: on; authenticated restart supported (the disk unlocks once at the next boot)
+password: accepted by sudo for you
+pre-restart command: none
+dry-run: everything is ready; not restarting. `mac-remote restart --yes` restarts.
+```
 
 ## Install
 
@@ -93,7 +103,7 @@ Keychain caveat: if macOS asks "allow access to this item?", nobody can click Al
 
 ## Options
 
-Environment variables override the config file. The config file accepts only `MAC_REMOTE_USER` and `MAC_REMOTE_PASS_CMD`.
+Environment variables override the config file. The config file accepts only `MAC_REMOTE_USER`, `MAC_REMOTE_PASS_CMD` and `MAC_REMOTE_RESTART_PRE_CMD`.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -103,6 +113,7 @@ Environment variables override the config file. The config file accepts only `MA
 | `MAC_REMOTE_CONFIG` | `~/.config/mac-remote/config` | Config file path (respects `XDG_CONFIG_HOME`). |
 | `MAC_REMOTE_HOME` | `~/.local/share/mac-remote` | Virtualenv, screenshots, log and socket (respects `XDG_DATA_HOME`). |
 | `MAC_REMOTE_PYTHON` | the virtualenv, else `python3` | Python used to run mac-remote, and to create the virtualenv in `setup`. |
+| `MAC_REMOTE_RESTART_PRE_CMD` | none | Command `restart --yes` runs before restarting (for example a script that saves your open terminal sessions). If it fails, the Mac is not restarted. Also accepted in the config file. |
 | `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD` | unset | Set to `1` to type a password that has `' " ` ~ ^` even though your keyboard layout has dead keys. Use it only if the lock screen uses a layout without them. |
 
 Command options (`mac-remote <command> --help` lists them all):
@@ -113,6 +124,25 @@ Command options (`mac-remote <command> --help` lists them all):
 - `type "text"`, `keys cmd+tab return esc`.
 - `click`, `move`, `type` and `keys` take `--app NAME`: bring that app to the front first, and refuse if it does not stay there.
 - `click`, `move`, `type`, `keys` and `lock` take `--force` to act even when someone seems to be using the Mac.
+- `restart --dry-run` checks everything and does not restart; `restart --yes` restarts. One of the two is required. `--force` restarts even when someone seems to be using the Mac.
+
+## Restart remotely (FileVault)
+
+With FileVault on, a normal restart stops at the disk password screen before macOS starts, so Screen Sharing never comes back and you cannot reach the Mac from far away. `mac-remote restart` uses `fdesetup authrestart` instead: macOS unlocks the disk once at the next boot, then starts normally. With FileVault off it runs `shutdown -r now`, and warns if automatic login is off (the Mac would stop at the login window).
+
+In order, it:
+
+1. Reads the FileVault state (`fdesetup isactive`). With FileVault on, it refuses if `fdesetup supportsauthrestart` is not `true`.
+2. Refuses if `MAC_REMOTE_USER` is not the user running mac-remote (sudo needs that user's password), or if someone used the Mac in the last 20 seconds (unless `--force`).
+3. Gets the password from `MAC_REMOTE_PASS_CMD` (or `MAC_REMOTE_PASS`) and checks it with `sudo -S -k -v`. The password goes to sudo on stdin.
+4. `--dry-run` stops here, drops the sudo ticket (`sudo -k`) and says whether everything is ready.
+5. `--yes` runs `MAC_REMOTE_RESTART_PRE_CMD` if set (a failure stops the restart), then runs `sudo -n fdesetup authrestart -inputplist`, with the user name and password in a property list on stdin. With FileVault off: `sudo -n shutdown -r now`.
+
+Per `man fdesetup`, FileVault protections are reduced until that next boot: an unlock key is kept in memory (and, on supported systems, the System Management Controller) until the disk is unlocked.
+
+The password is never printed, logged or put on a command line. Each step goes to `restart.log` in the data folder. Your user must be allowed to use sudo (an admin account) and must be a FileVault-enabled user.
+
+After the restart, wait a few minutes and run `mac-remote status`. If the Mac stopped at the login window (FileVault off, no automatic login), `mac-remote unlock` can type the password there; that path was not tested.
 
 ## Requirements
 
@@ -138,7 +168,7 @@ Safety rules in the code:
 - `type` pastes through the clipboard when typing key by key would lose characters: emoji, or `' " ` ~ ^` on a keyboard layout with dead keys. It checks the lock and local activity first, so a refused command does not touch the clipboard. It saves every item and format on the clipboard (text, images, files, rich text) and puts them back after the paste. If something new was copied in the meantime, it leaves that and says the clipboard was not restored. Text equal to `MAC_REMOTE_PASS` is never pasted. Do not use `type` for secrets.
 - `--app NAME` is passed to AppleScript as an argument, never as script code.
 
-State lives in `~/.local/share/mac-remote/`: `holder.log` (what happened and why the holder exited), `holder.json`, `holder.sock`, `last-shot.json`, `state.json`, `shots/`.
+State lives in `~/.local/share/mac-remote/`: `holder.log` (what happened and why the holder exited), `restart.log`, `holder.json`, `holder.sock`, `last-shot.json`, `state.json`, `shots/`.
 
 ## Uninstall
 
@@ -157,6 +187,7 @@ Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.c
 - Not tested: the holder rejecting a socket client from another user (only reading the peer's user id was tested), and a real VNC drop in the middle of a held session.
 - Passwords with characters VNC cannot type are refused at unlock time. So are passwords with `' " ` ~ ^` when the selected keyboard layout has dead keys (U.S. International, ABNT and similar), because typed key by key those characters can change or vanish and cause two wrong attempts. mac-remote reads your selected layout, not the lock screen's; see `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD`.
 - Clipboard save and restore was tested live with text only (the text came back after a paste); images and files were tested with fakes and a private pasteboard. Data that an app only provides on request (some promised files) may not come back.
+- `restart` was tested only with fake `fdesetup`, `sudo`, `sysadminctl` and `shutdown` on `PATH`; the tests never restart anything. It was not run on a real Mac in this release. The steps follow the `fdesetup` manual page (`authrestart -inputplist` with `Username` and `Password` keys) and a script the author used on his own Mac.
 - Not tested in the Claude desktop app or on claude.ai. Per the Claude Code docs, claude.ai and Cowork do not install plugins that have a top-level `bin/` folder.
 
 ## License
