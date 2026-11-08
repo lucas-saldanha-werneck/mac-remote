@@ -76,7 +76,7 @@ Examples:
 | Source | Store it once | `MAC_REMOTE_PASS_CMD` |
 |---|---|---|
 | macOS Keychain | `security add-generic-password -a "$USER" -s mac-remote -w` (prompts for the password) | `security find-generic-password -a "$USER" -s mac-remote -w` |
-| 1Password CLI | save a login item in 1Password | `op read "op://<vault>/<item>/password"` |
+| 1Password CLI | save a login item in 1Password, then copy the secret reference of its password field | `op read "<secret reference>"` |
 | Any other manager | | any command that prints only the password |
 
 The command runs with a shell, only when a new VNC login is needed. Its output is captured and its error output is discarded, so nothing it prints reaches Claude. If it fails, mac-remote only reports the exit code; run the command yourself to see why.
@@ -95,6 +95,7 @@ Environment variables override the config file. The config file accepts only `MA
 | `MAC_REMOTE_CONFIG` | `~/.config/mac-remote/config` | Config file path (respects `XDG_CONFIG_HOME`). |
 | `MAC_REMOTE_HOME` | `~/.local/share/mac-remote` | Virtualenv, screenshots, log and socket (respects `XDG_DATA_HOME`). |
 | `MAC_REMOTE_PYTHON` | the virtualenv, else `python3` | Python used to run mac-remote, and to create the virtualenv in `setup`. |
+| `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD` | unset | Set to `1` to type a password that has `' " ` ~ ^` even though your keyboard layout has dead keys. Use it only if the lock screen uses a layout without them. |
 
 Command options (`mac-remote <command> --help` lists them all):
 
@@ -123,9 +124,11 @@ Safety rules in the code:
 - Input commands refuse if the screen is locked, or if there was local mouse or keyboard input in the last 20 seconds that mac-remote did not send. mac-remote records the time of its own input so it can tell the difference.
 - If you come back while the holder is open, it logs "LOCAL ACTIVITY" and stays connected so the screen does not lock on you. The idle timer restarts from your last input.
 - The holder exits, and macOS locks, on idle timeout, when the VNC connection drops, when the screen gets locked some other way, or on SIGTERM.
+- A stop request (SIGTERM or `lock`) during `unlock` cancels it: the password is not typed, or Return is not pressed. If the password command is still running, the holder waits for it to finish, then exits without using the password. When `unlock` gives up after 120 seconds, it waits until the holder has exited before it says so.
 - The holder fetches the password once and drops it right after unlocking.
 - `lock` asks the holder to disconnect. If the screen stays unlocked it sends Ctrl+Cmd+Q over VNC, then runs `pmset displaysleepnow`.
-- `type` pastes through the clipboard (and restores the old clipboard) when typing key by key would lose characters: emoji, or `' " ` ~ ^` on a keyboard layout with dead keys. Text equal to `MAC_REMOTE_PASS` is never pasted. Do not use `type` for secrets.
+- `type` pastes through the clipboard when typing key by key would lose characters: emoji, or `' " ` ~ ^` on a keyboard layout with dead keys. It checks the lock and local activity first, so a refused command does not touch the clipboard. It saves every item and format on the clipboard (text, images, files, rich text) and puts them back after the paste. If something new was copied in the meantime, it leaves that and says the clipboard was not restored. Text equal to `MAC_REMOTE_PASS` is never pasted. Do not use `type` for secrets.
+- `--app NAME` is passed to AppleScript as an argument, never as script code.
 
 State lives in `~/.local/share/mac-remote/`: `holder.log` (what happened and why the holder exited), `holder.json`, `holder.sock`, `last-shot.json`, `state.json`, `shots/`.
 
@@ -143,7 +146,8 @@ Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.c
 - Tests in `tests/` replace the VNC connection with fakes and never touch the screen: `python3 tests/test_mac_remote.py`. Unlock, click and type on a real Mac were tested by the author with the earlier private version of this tool, not re-run for this release.
 - The tests ran on one Mac with Python 3.14 and 3.15. Other macOS versions, Intel Macs and setups with several users were not tested.
 - Not tested: the holder rejecting a socket client from another user (only reading the peer's user id was tested), and a real VNC drop in the middle of a held session.
-- Passwords with characters VNC cannot type are refused at unlock time.
+- Passwords with characters VNC cannot type are refused at unlock time. So are passwords with `' " ` ~ ^` when the selected keyboard layout has dead keys (U.S. International, ABNT and similar), because typed key by key those characters can change or vanish and cause two wrong attempts. mac-remote reads your selected layout, not the lock screen's; see `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD`.
+- Clipboard save and restore was tested with fakes and with a private pasteboard, not with the real clipboard. Data that an app only provides on request (some promised files) may not come back.
 - Not tested in the Claude desktop app or on claude.ai. Per the Claude Code docs, claude.ai and Cowork do not install plugins that have a top-level `bin/` folder.
 
 ## License

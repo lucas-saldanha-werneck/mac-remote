@@ -85,6 +85,9 @@ class FakeSession:
     def check(self):
         pass
 
+    async def close(self, grace=0):
+        pass
+
 
 def keydowns(data):
     """Keysyms of the key-down events (RFB KeyEvent, down flag = 1) in written bytes."""
@@ -306,6 +309,209 @@ class HolderSocket(unittest.TestCase):
         s.close()                               # file stays, nobody listens
         self.assertIsNone(mr.holder_call({'cmd': 'ping'}))
         self.assertFalse(os.path.exists(mr.SOCK))
+
+
+class FakeItem:
+    """Stand-in for NSPasteboardItem: an ordered list of (type, data)."""
+    def __init__(self, pairs=None):
+        self.pairs = list(pairs or [])
+
+    def types(self):
+        return [t for t, _ in self.pairs]
+
+    def dataForType_(self, t):
+        return dict(self.pairs).get(t)
+
+    def setData_forType_(self, data, t):
+        self.pairs.append((t, data))
+        return True
+
+
+class FakePasteboard:
+    """Stand-in for NSPasteboard.generalPasteboard(). The real clipboard is never touched."""
+    TEXT = 'public.utf8-plain-text'
+
+    def __init__(self, items):
+        self.items = [FakeItem(p) for p in items]
+        self.count = 1
+
+    def contents(self):
+        return [it.pairs for it in self.items]
+
+    def changeCount(self):
+        return self.count
+
+    def pasteboardItems(self):
+        return list(self.items)
+
+    def clearContents(self):
+        self.items = []
+        self.count += 1
+        return self.count
+
+    def setString_forType_(self, s, t):
+        self.items = [FakeItem([(t, s.encode())])]
+        return True
+
+    def writeObjects_(self, objs):
+        self.items.extend(objs)
+        return True
+
+    def fake_run(self, args, input=None, **kw):
+        """pbpaste/pbcopy emulated on this fake (what the old code used)."""
+        if args == ['pbpaste']:
+            return types.SimpleNamespace(stdout=self.dataForText(), returncode=0)
+        if args == ['pbcopy']:
+            self.clearContents()
+            self.items = [FakeItem([(self.TEXT, input or b'')])]
+            return types.SimpleNamespace(stdout=b'', returncode=0)
+        raise AssertionError(f'unexpected subprocess call {args}')
+
+    def dataForText(self):
+        for it in self.items:
+            d = it.dataForType_(self.TEXT)
+            if d is not None:
+                return d
+        return b''
+
+
+class Findings(unittest.TestCase):
+    """Regression tests for the second review round."""
+
+    def setUp(self):
+        os.environ.pop('MAC_REMOTE_PASS', None)
+        os.environ.pop('MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD', None)
+
+    # --app must never become AppleScript source
+    def test_app_name_is_not_interpolated_into_applescript(self):
+        evil = 'Finder" to quit\ndo shell script "touch /tmp/pwned'
+        calls = []
+
+        def fake_run(args, **kw):
+            calls.append(args)
+            return types.SimpleNamespace(stdout=b'', returncode=0)
+
+        with mock.patch.object(mr, 'is_locked', return_value=False), \
+                mock.patch.object(mr, 'user_active', return_value=(False, 99.0)), \
+                mock.patch.object(mr, 'frontmost', return_value=evil), \
+                mock.patch.object(mr.subprocess, 'run', fake_run):
+            mr.prepare_input({'app': evil})
+        osa = [c for c in calls if c[0] == 'osascript']
+        self.assertEqual(len(osa), 1)
+        scripts = [osa[0][i + 1] for i, x in enumerate(osa[0]) if x == '-e']
+        self.assertFalse(any('Finder' in s or 'shell' in s for s in scripts), osa[0])
+        self.assertEqual(osa[0][-1], evil)                  # passed as data, in argv
+
+    # a stop request must cancel the unlock before the password is typed
+    def test_unlock_types_nothing_after_stop(self):
+        h = mr.Holder(600)
+        h.s = FakeSession()
+        h.stop('signal SIGTERM')
+        with mock.patch.object(mr.asyncio, 'sleep', new=mock.AsyncMock()), \
+                mock.patch.object(mr, 'is_locked', return_value=True), \
+                mock.patch.object(mr, 'layout_has_dead_keys', return_value=False):
+            with self.assertRaises(mr.Fail):
+                asyncio.run(h.unlock('ab'))
+        self.assertEqual(keydowns(h.s.c.writer.data), [])
+
+    def test_stop_during_password_fetch_skips_unlock(self):
+        h = mr.Holder(600)
+
+        def fetch():
+            h.stop('signal SIGTERM')          # arrives while the password command runs
+            return ('u', 'pw')
+
+        unlock = mock.AsyncMock()
+        sess = FakeSession()
+        buf = io.StringIO()
+        with mock.patch.object(mr, 'creds', side_effect=fetch), \
+                mock.patch.object(mr, 'open_session', new=mock.AsyncMock(return_value=sess)), \
+                mock.patch.object(mr, 'is_locked', return_value=True), \
+                mock.patch.object(h, 'unlock', new=unlock), \
+                mock.patch.object(mr.asyncio, 'sleep', new=mock.AsyncMock()), \
+                contextlib.redirect_stdout(buf):
+            rc = asyncio.run(h.run())
+        unlock.assert_not_called()
+        self.assertEqual(rc, 1)
+
+    def test_unlock_timeout_waits_for_the_holder_to_exit(self):
+        events = []
+
+        class P:
+            pid = 999999
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                events.append('wait')
+                self.returncode = -15
+                return self.returncode
+
+        p = P()
+        clock = iter(range(0, 10**6, 100))
+        a = types.SimpleNamespace(idle_timeout=600)
+        with mock.patch.object(mr, 'holder_info', return_value=None), \
+                mock.patch.object(mr, 'is_locked', return_value=True), \
+                mock.patch.object(mr, 'pass_source', return_value='env'), \
+                mock.patch.object(mr.subprocess, 'Popen', return_value=p), \
+                mock.patch.object(mr.os, 'kill', side_effect=lambda pid, sig: events.append(('kill', sig))), \
+                mock.patch.object(mr.time, 'sleep'), \
+                mock.patch.object(mr.time, 'time', side_effect=lambda: next(clock)):
+            with self.assertRaises(mr.Fail) as e:
+                mr.cmd_unlock(a)
+        self.assertEqual(events[0], ('kill', mr.signal.SIGTERM))
+        self.assertIn('wait', events)
+        self.assertIn('holder stopped', str(e.exception))
+
+    # the paste path must keep every clipboard format, and touch nothing when it refuses
+    def run_paste(self, pb, locked=False, active=False):
+        with mock.patch.object(mr, 'pasteboard', return_value=pb, create=True), \
+                mock.patch.object(mr, 'new_pb_item', side_effect=FakeItem, create=True), \
+                mock.patch.object(mr.subprocess, 'run', pb.fake_run), \
+                mock.patch.object(mr, 'needs_paste', return_value=True), \
+                mock.patch.object(mr, 'is_locked', return_value=locked), \
+                mock.patch.object(mr, 'user_active', return_value=(active, 3.0)), \
+                mock.patch.object(mr, 'run_request', return_value='ok') as rr, \
+                mock.patch.object(mr.time, 'sleep'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            mr.cmd_type(types.SimpleNamespace(text='ok \U0001F600', force=False, app=None))
+        return rr
+
+    def test_paste_restores_non_text_clipboard(self):
+        original = [[('public.png', b'\x89PNG...'), ('public.tiff', b'II*...')],
+                    [('public.file-url', b'file:///a')]]
+        pb = FakePasteboard(original)
+        rr = self.run_paste(pb)
+        rr.assert_called_once()
+        self.assertEqual(pb.contents(), original)
+
+    def test_paste_refused_when_locked_leaves_clipboard_alone(self):
+        original = [[('public.png', b'\x89PNG...')]]
+        pb = FakePasteboard(original)
+        with self.assertRaises(mr.Fail):
+            self.run_paste(pb, locked=True)
+        self.assertEqual(pb.contents(), original)
+
+    def test_paste_refused_when_someone_is_at_the_mac_leaves_clipboard_alone(self):
+        original = [[('public.png', b'\x89PNG...')]]
+        pb = FakePasteboard(original)
+        with self.assertRaises(mr.Fail):
+            self.run_paste(pb, active=True)
+        self.assertEqual(pb.contents(), original)
+
+    # dead-key characters in the password: refuse instead of risking two wrong passwords
+    def test_dead_key_password_is_refused_before_typing(self):
+        h = mr.Holder(600)
+        h.s = FakeSession()
+        with mock.patch.object(mr.asyncio, 'sleep', new=mock.AsyncMock()), \
+                mock.patch.object(mr, 'is_locked', return_value=True), \
+                mock.patch.object(mr, 'layout_has_dead_keys', return_value=True):
+            with self.assertRaises(mr.Fail) as e:
+                asyncio.run(h.unlock("pa'ss"))
+        self.assertEqual(keydowns(h.s.c.writer.data), [])
+        self.assertIn('dead key', str(e.exception))
 
 
 class Cli(unittest.TestCase):

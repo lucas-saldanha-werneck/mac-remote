@@ -10,7 +10,7 @@ The Mac password comes from MAC_REMOTE_PASS_CMD (a command that prints it, e.g. 
 password manager or the macOS Keychain) or from the MAC_REMOTE_PASS environment variable.
 It is fetched only when a new VNC login is needed, and is never printed, logged, written
 to disk, pasted, or put on a command line."""
-import argparse, asyncio, fcntl, getpass, json, os, re, signal, socket, struct, subprocess, sys, time
+import argparse, asyncio, contextlib, fcntl, getpass, json, os, re, signal, socket, struct, subprocess, sys, time
 
 HOME = os.path.expanduser(os.environ.get('MAC_REMOTE_HOME') or os.path.join(
     os.environ.get('XDG_DATA_HOME') or '~/.local/share', 'mac-remote'))
@@ -374,8 +374,14 @@ async def mouse_click(c, button=0):
     await c.drain()
 
 
-async def type_password(s, pw):
+async def type_password(s, pw, stopped=lambda: False):
+    """stopped() is checked before every password key and before Return; if it turns true the
+    partial input is not submitted (the next attempt clears it with BackSpace)."""
     c = s.c
+    def check():
+        if stopped():
+            raise Fail('stop requested while typing the password; it was not submitted')
+    check()
     await press(c, 'Shift_L')                    # wake the lock screen (proven)
     await asyncio.sleep(1.5)
     for _ in range(len(pw) + 8):                 # clear leftovers of an earlier, partial attempt
@@ -383,9 +389,11 @@ async def type_password(s, pw):
         await asyncio.sleep(0.03)
     await asyncio.sleep(0.4)
     for ch in pw:
+        check()
         await press(c, ch)
         await asyncio.sleep(KEY_GAP)
     await asyncio.sleep(0.4)
+    check()
     await press(c, 'Return')
 
 
@@ -425,16 +433,24 @@ def render_shot(px, screens, path, display):
 
 
 # ---------- actions shared by the holder and one-off sessions ----------
-def prepare_input(r):
+def refuse_if_busy(force):
     if is_locked():
         raise Fail('screen is LOCKED: refusing to send input. Run `mac-remote unlock` first.')
     act, idle = user_active()
-    if act and not r.get('force'):
+    if act and not force:
         raise Fail(f'someone seems to be using the Mac (last local input {idle:.0f}s ago). '
                    'Refusing so we do not fight over mouse/keyboard. Use --force only if they agreed.')
+
+
+# The app name is passed as an argument, never pasted into the script source.
+ACTIVATE_SCRIPT = ['-e', 'on run argv', '-e', 'tell application (item 1 of argv) to activate', '-e', 'end run', '--']
+
+
+def prepare_input(r):
+    refuse_if_busy(r.get('force'))
     app = r.get('app')
     if app:
-        subprocess.run(['osascript', '-e', f'tell application "{app}" to activate'], capture_output=True, timeout=10)
+        subprocess.run(['osascript', *ACTIVATE_SCRIPT, app], capture_output=True, timeout=10)
         for _ in range(20):
             if frontmost() == app:
                 break
@@ -590,14 +606,42 @@ class Holder:
             try: writer.close()
             except Exception: pass
 
+    def check_stop(self):
+        if self.stop_evt.is_set():
+            raise Fail(f'stopped before unlocking ({self.stop_reason}); password not typed')
+
+    async def until_stopped(self, coro):
+        """Run coro, but give up as soon as a stop request (SIGTERM, socket 'stop') arrives."""
+        task = asyncio.ensure_future(coro)
+        waiter = asyncio.ensure_future(self.stop_evt.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if task.done():
+            return task.result()
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+        self.check_stop()
+
     async def unlock(self, pw):
         import asyncvnc
         if any(ch not in asyncvnc.key_codes for ch in pw):
             raise Fail('the Mac password has a character VNC cannot type; unlock not attempted')
+        if (any(ch in DEAD_KEY_CHARS for ch in pw) and layout_has_dead_keys()
+                and os.environ.get('MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD') != '1'):
+            raise Fail('the Mac password has a character that is a dead key on the selected keyboard layout '
+                       f"({DEAD_KEY_CHARS}); typed key by key it can change or vanish, so unlock was not attempted. "
+                       'Select a layout without dead keys (for example U.S.), or set '
+                       'MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD=1 if the lock screen uses a layout without them')
         for attempt in (1, 2):
+            self.check_stop()
             self.phase = f'unlocking (try {attempt})'
             self.log(self.phase)
-            await type_password(self.s, pw)
+            await type_password(self.s, pw, self.stop_evt.is_set)
             for _ in range(20):
                 await asyncio.sleep(0.5)
                 self.s.check()
@@ -656,8 +700,12 @@ class Holder:
         rc = 0
         cred = None
         try:
-            cred = creds()            # fetched once, here, and dropped right after the unlock
-            self.s = await open_session(first=True, cred=cred)
+            # Fetched once, here, and dropped right after the unlock. It runs in a thread so a stop
+            # request (SIGTERM, socket 'stop') is seen while the password command waits.
+            cred = await self.until_stopped(loop.run_in_executor(None, creds))
+            self.check_stop()
+            self.s = await self.until_stopped(open_session(first=True, cred=cred))
+            self.check_stop()
             self.log('VNC connected, framebuffer warm')
             if not is_locked():
                 self.phase = 'not-needed'
@@ -835,7 +883,10 @@ def cmd_unlock(a):
                       f"(idle-timeout {a.idle_timeout}s). Finish with: mac-remote lock")
                 return 0
             if phase == 'failed':
-                wait_holder_exit(p.pid, 10)
+                try:
+                    p.wait(timeout=10)            # pid_alive() would see our unreaped child as alive
+                except subprocess.TimeoutExpired:
+                    pass
                 raise Fail(f"unlock failed: {h['error']} (screen locked: {'yes' if is_locked() else 'no'}). "
                            f"Take a shot to see; do not retry in a loop (account lockout).")
         if p.poll() is not None:
@@ -843,11 +894,24 @@ def cmd_unlock(a):
                 print('already unlocked; no holder needed')
                 return 0
             raise Fail(f'holder exited (rc {p.returncode}) before unlocking; see {HOLDER_LOG}')
-    try:
-        os.kill(p.pid, signal.SIGTERM)
-    except Exception:
-        pass
-    raise Fail(f'unlock timed out after 120s (last phase {phase}); holder stopped. See {HOLDER_LOG}')
+    # Stop the holder and wait until it is really gone before saying so. SIGTERM makes it give up
+    # before typing the password; SIGKILL is the fallback (it drops VNC, so macOS re-locks).
+    for sig, secs in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+        try:
+            os.kill(p.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            p.wait(timeout=secs)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    locked = 'yes' if is_locked() else 'no'
+    if p.poll() is None:
+        raise Fail(f'unlock timed out after 120s (last phase {phase}) and holder pid {p.pid} did not exit; '
+                   f'screen locked: {locked}. See {HOLDER_LOG}')
+    raise Fail(f'unlock timed out after 120s (last phase {phase}); holder stopped (exit confirmed); '
+               f'screen locked: {locked}. See {HOLDER_LOG}')
 
 
 async def vnc_lock_keys():
@@ -1000,17 +1064,79 @@ def cmd_keys(a):
     return 0
 
 
+# ---------- clipboard (paste path of `type`) ----------
+# AppKit comes with pyobjc-framework-Quartz (it depends on pyobjc-framework-Cocoa).
+def pasteboard():
+    import AppKit
+    return AppKit.NSPasteboard.generalPasteboard()
+
+
+def new_pb_item():
+    import AppKit
+    return AppKit.NSPasteboardItem.alloc().init()
+
+
+def clip_snapshot(pb):
+    """Every item on the clipboard with every type it offers (text, image, files, rich text...)."""
+    snap = []
+    for item in pb.pasteboardItems() or []:
+        pairs = []
+        for t in item.types() or []:
+            data = item.dataForType_(t)
+            if data is not None:
+                pairs.append((t, data))
+        snap.append(pairs)
+    return snap
+
+
+def clip_set_text(pb, text):
+    pb.clearContents()
+    pb.setString_forType_(text, 'public.utf8-plain-text')
+    return pb.changeCount()
+
+
+def clip_restore(pb, snap, ours):
+    """Put the snapshot back, unless something new was copied after our text (then leave it)."""
+    if pb.changeCount() != ours:
+        return False
+    pb.clearContents()
+    items = []
+    for pairs in snap:
+        item = new_pb_item()
+        for t, data in pairs:
+            item.setData_forType_(data, t)
+        items.append(item)
+    if items:
+        pb.writeObjects_(items)
+    return True
+
+
+@contextlib.contextmanager
+def clipboard_lock():
+    """One paste at a time, so two `type` calls do not save each other's text as 'the old clipboard'."""
+    with open(os.path.join(HOME, 'clipboard.lock'), 'w') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def cmd_type(a):
     if needs_paste(a.text):
-        # Paste through the clipboard, then give the old clipboard back.
-        old = subprocess.run(['pbpaste'], capture_output=True).stdout
-        subprocess.run(['pbcopy'], input=a.text.encode(), check=True)
-        try:
-            run_request(input_req(a, cmd='keys', combos=[parse_combo('cmd+v')]), 30)
-            time.sleep(0.6)                                  # let the app read the clipboard
-        finally:
-            subprocess.run(['pbcopy'], input=old)
-        print('typed text by paste (length not shown); clipboard restored')
+        # Paste through the clipboard, then give the old clipboard back. Check first, so a refused
+        # command never touches the clipboard.
+        req = input_req(a, cmd='keys', combos=[parse_combo('cmd+v')])
+        refuse_if_busy(a.force)
+        with clipboard_lock():
+            pb = pasteboard()
+            snap = clip_snapshot(pb)
+            ours = clip_set_text(pb, a.text)
+            try:
+                run_request(req, 30)
+                time.sleep(0.6)                              # let the app read the clipboard
+            finally:
+                restored = clip_restore(pb, snap, ours)
+        print('typed text by paste (length not shown); '
+              + ('clipboard restored' if restored else
+                 'clipboard NOT restored because something new was copied meanwhile'))
         return 0
     keys = type_keys(a.text)
     print(run_request(input_req(a, cmd='type', keys=keys), 30 + 0.2 * len(keys)))

@@ -29,9 +29,10 @@ macOS locks the screen again about 1 s after the VNC session that unlocked it di
 - The holder exits (and the screen locks) when: `--idle-timeout` seconds pass with no command **and** no local input; the VNC connection drops; the screen gets locked some other way; or it gets SIGTERM.
 - **Someone using the Mac = hands off.** click/move/type/keys and `lock` refuse if there was local input (not ours) in the last 20 s. Use `--force` only after the user said yes. VNC input also resets the system idle time, so mac-remote records the time of its own input (`state.json`) and only counts input after that as someone else's.
 - If someone comes back while the holder is open, the holder logs "LOCAL ACTIVITY" in `holder.log` and stays connected, so the screen does not lock in their face. The idle timer restarts from their last input. Ask before running `lock` if they are at the Mac.
-- `type` with `' " ` ~ ^` on a keyboard layout with dead keys, or with characters VNC cannot send (emoji), pastes instead: copy, Cmd+V, then restore the old clipboard. Text equal to `$MAC_REMOTE_PASS` is never pasted.
+- `type` with `' " ` ~ ^` on a keyboard layout with dead keys, or with characters VNC cannot send (emoji), pastes instead: save every clipboard item and format, copy, Cmd+V, then restore them (not if something new was copied meanwhile). It refuses before touching the clipboard when the screen is locked or someone is at the Mac. Text equal to `$MAC_REMOTE_PASS` is never pasted.
 - **Never** type a secret with `type`. The Mac password exists only inside the holder during `unlock` (and the holder drops it right after). Do not read it, print it, or send it anywhere.
 - While the holder holds the session, anyone at the desk sees an unlocked Mac. Hold it only as long as needed.
+- `unlock` refuses a password with `' " ` ~ ^` when the keyboard layout has dead keys. Tell the user; do not set `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD` yourself.
 - If `unlock` fails ("still locked"), run `shot` and look at the screen. It tries twice and stops. Do not retry in a loop: too many wrong passwords can lock the account.
 
 ## Known issues
