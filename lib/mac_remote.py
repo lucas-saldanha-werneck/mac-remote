@@ -10,7 +10,7 @@ The Mac password comes from MAC_REMOTE_PASS_CMD (a command that prints it, e.g. 
 password manager or the macOS Keychain) or from the MAC_REMOTE_PASS environment variable.
 It is fetched only when a new VNC login is needed, and is never printed, logged, written
 to disk, pasted, or put on a command line."""
-import argparse, asyncio, contextlib, fcntl, getpass, json, os, re, signal, socket, struct, subprocess, sys, time
+import argparse, asyncio, contextlib, fcntl, json, os, plistlib, pwd, re, signal, socket, struct, subprocess, sys, time
 
 HOME = os.path.expanduser(os.environ.get('MAC_REMOTE_HOME') or os.path.join(
     os.environ.get('XDG_DATA_HOME') or '~/.local/share', 'mac-remote'))
@@ -49,6 +49,7 @@ SOCK = sock_path(HOME)
 HOLDER_JSON = os.path.join(HOME, 'holder.json')
 HOLDER_LOG = os.path.join(HOME, 'holder.log')
 HOLDER_LOCK = os.path.join(HOME, 'holder.lock')
+RESTART_LOG = os.path.join(HOME, 'restart.log')
 HOST, PORT = '127.0.0.1', 5900   # local Screen Sharing only, on purpose
 PASS_CMD_TIMEOUT = 120    # seconds; a password manager may wait for Touch ID
 ACTIVE_SECS = 20          # local input newer than this = someone is at the Mac
@@ -168,7 +169,7 @@ def pid_alive(pid):
 
 
 # ---------- configuration and credentials ----------
-CONFIG_KEYS = ('MAC_REMOTE_USER', 'MAC_REMOTE_PASS_CMD')   # MAC_REMOTE_PASS is env-only, never a file
+CONFIG_KEYS = ('MAC_REMOTE_USER', 'MAC_REMOTE_PASS_CMD', 'MAC_REMOTE_RESTART_PRE_CMD')   # MAC_REMOTE_PASS is env-only
 
 
 def load_config(path=None):
@@ -195,7 +196,7 @@ def load_config(path=None):
 
 
 def mac_user():
-    return load_config().get('MAC_REMOTE_USER') or getpass.getuser()
+    return load_config().get('MAC_REMOTE_USER') or real_user()
 
 
 def pass_source():
@@ -1172,6 +1173,146 @@ def cmd_type(a):
     return 0
 
 
+# ---------- restart (FileVault: authenticated restart) ----------
+PRE_CMD_TIMEOUT = 600
+
+
+def restart_log(msg):
+    """One line per step in restart.log. Never the password."""
+    try:
+        with open(RESTART_LOG, 'a') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+    except OSError:
+        pass
+
+
+def say(msg):
+    print(msg)
+    restart_log(msg)
+
+
+def run_tool(args, stdin=None, timeout=60, with_stderr=False):
+    """Run a system tool found on PATH. Returns (rc, stdout). Its stderr is discarded unless asked
+    for (with sudo -S it could echo what it read). A missing tool is rc 127."""
+    try:
+        r = subprocess.run(args, input=stdin, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT if with_stderr else subprocess.DEVNULL, timeout=timeout)
+    except FileNotFoundError:
+        return 127, ''
+    except subprocess.TimeoutExpired:
+        return 124, ''
+    return r.returncode, r.stdout.decode('utf-8', 'replace').strip()
+
+
+def sudo_validate(password):
+    """Check the password with sudo (read from stdin, never argv) and leave a fresh sudo ticket.
+    `sudo -k` runs on its own first: combined with -v, real sudo checks the password but does not
+    cache a ticket (man sudo, -k), and the later `sudo -n` would fail."""
+    run_tool(['sudo', '-k'])
+    rc, _ = run_tool(['sudo', '-S', '-p', '', '-v'], stdin=(password + '\n').encode(), timeout=30)
+    return rc == 0
+
+
+def real_user():
+    """The user this process runs as (not $USER/$LOGNAME, which anyone can set)."""
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def check_nobody_at_the_mac(a):
+    act, idle = user_active()
+    if act and not a.force:
+        raise Fail(f'someone used this Mac {idle:.0f}s ago; not restarting (use --force if that is fine)')
+
+
+def run_pre_command(pre):
+    """Run MAC_REMOTE_RESTART_PRE_CMD; on failure log the end of its stderr and stop."""
+    say(f'pre-restart command: {pre}')
+    try:
+        r = subprocess.run(pre, shell=True, stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=PRE_CMD_TIMEOUT)
+        prc, err = r.returncode, r.stderr
+    except subprocess.TimeoutExpired as e:
+        prc, err = 124, e.stderr
+    if prc != 0:
+        tail = (err or b'').decode('utf-8', 'replace').strip().splitlines()[-5:]
+        if tail:
+            restart_log('pre-restart command stderr (last lines): ' + ' | '.join(tail)[-500:])
+        raise Fail(f'MAC_REMOTE_RESTART_PRE_CMD failed (exit {prc}); not restarting. See {RESTART_LOG}')
+
+
+def check_filevault_user(user):
+    """Needs root: runs under the sudo ticket just validated. Output lines are `shortname,UUID`."""
+    rc, out = run_tool(['sudo', '-n', 'fdesetup', 'list'])
+    if rc != 0:
+        raise Fail(f'could not list the FileVault users (sudo -n fdesetup list, exit {rc}); not restarting')
+    users = [line.split(',', 1)[0].strip() for line in out.splitlines() if line.strip()]
+    if user not in users:
+        raise Fail(f'{user!r} is not a FileVault-enabled user (fdesetup list), so authrestart cannot '
+                   'unlock the disk; not restarting')
+    say(f'FileVault user: {user} is enabled')
+
+
+def cmd_restart(a):
+    """Restart this Mac. With FileVault on: `fdesetup authrestart`, which unlocks the disk once at the
+    next boot, so the Mac does not stop at the FileVault password screen. With FileVault off:
+    `shutdown -r now`. The password goes to sudo and fdesetup on stdin only."""
+    restart_log(f"restart {'--dry-run' if a.dry_run else '--yes'} requested")
+    rc, out = run_tool(['fdesetup', 'isactive'])
+    if rc == 127:
+        raise Fail('fdesetup not found (macOS only)')
+    if out not in ('true', 'false'):
+        raise Fail(f'could not read the FileVault state (fdesetup isactive printed {out[:40]!r}, exit {rc})')
+    filevault = out == 'true'
+    if filevault:
+        rc, out = run_tool(['fdesetup', 'supportsauthrestart'])
+        if out != 'true':
+            raise Fail('FileVault is on, but this Mac does not support an authenticated restart '
+                       '(fdesetup supportsauthrestart). A restart would stop at the disk password screen.')
+        say('FileVault: on; authenticated restart supported (the disk unlocks once at the next boot)')
+    else:
+        say('FileVault: off; a normal restart (shutdown -r now)')
+        rc, out = run_tool(['sysadminctl', '-autologin', 'status'], with_stderr=True)  # it prints to stderr
+        if 'automatic login user' not in out.lower():
+            say('warning: automatic login looks off, so the Mac will stop at the login window after the restart')
+    user, me = mac_user(), real_user()
+    if user != me:
+        raise Fail(f'MAC_REMOTE_USER is {user!r}, but restart runs as {me!r}: sudo needs the password of '
+                   'the user running mac-remote. Run it as that user, or unset MAC_REMOTE_USER.')
+    check_nobody_at_the_mac(a)
+    password = get_password()
+    try:
+        if not sudo_validate(password):
+            raise Fail('sudo did not accept the password from the password source; nothing was restarted')
+        say(f'password: accepted by sudo for {user}')
+        if filevault:
+            check_filevault_user(user)
+        pre = load_config().get('MAC_REMOTE_RESTART_PRE_CMD')
+        if a.dry_run:
+            say(f'pre-restart command: {"would run" if pre else "none"}{" (" + pre + ")" if pre else ""}')
+            say('dry-run: everything is ready; not restarting. `mac-remote restart --yes` restarts.')
+            return 0
+        if pre:
+            run_tool(['sudo', '-k'])                  # no sudo ticket while the pre-command runs
+            run_pre_command(pre)
+            if not sudo_validate(password):
+                raise Fail('sudo did not accept the password after the pre-restart command; not restarting')
+        check_nobody_at_the_mac(a)                    # the password source and pre-command may have taken minutes
+        if filevault:
+            plist = plistlib.dumps({'Username': user, 'Password': password})
+            say('restarting now with fdesetup authrestart')
+            rc, _ = run_tool(['sudo', '-n', 'fdesetup', 'authrestart', '-inputplist'], stdin=plist, timeout=120)
+        else:
+            say('restarting now with shutdown -r now')
+            rc, _ = run_tool(['sudo', '-n', 'shutdown', '-r', 'now'], timeout=120)
+    finally:
+        password = None
+        run_tool(['sudo', '-k'])
+    if rc != 0:
+        raise Fail(f'the restart command failed (exit {rc}); the Mac was not restarted. See {RESTART_LOG}')
+    say('restart command accepted; this Mac is going down. Wait a few minutes, then run `mac-remote status`.')
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ['_holder']:
@@ -1187,9 +1328,11 @@ def main(argv=None):
         f'used the Mac in the last {ACTIVE_SECS}s (unless --force). The holder exits (macOS re-locks)\n'
         'after --idle-timeout s without commands AND without local input, if VNC drops, or on SIGTERM.\n'
         'First run: `mac-remote setup` (virtualenv with the Python dependencies).\n'
+        'restart --dry-run / --yes: restart this Mac; with FileVault, fdesetup authrestart skips the disk\n'
+        'password screen once. Optional MAC_REMOTE_RESTART_PRE_CMD runs first; if it fails, no restart.\n'
         f'Password: MAC_REMOTE_PASS_CMD (command that prints it) or MAC_REMOTE_PASS; user: MAC_REMOTE_USER\n'
         f'(default: current user). Config file: {CONFIG}\n'
-        f'Files: {HOME}/{{holder.sock,holder.json,holder.log,last-shot.json,shots/}}'))
+        f'Files: {HOME}/{{holder.sock,holder.json,holder.log,last-shot.json,restart.log,shots/}}'))
     sp = p.add_subparsers(dest='cmd', required=True, metavar='COMMAND')
     sp.add_parser('status', help='locked?, idle seconds, holder, displays (no credentials needed)')
     u = sp.add_parser('unlock', help='unlock and HOLD the session (detached holder)')
@@ -1218,6 +1361,11 @@ def main(argv=None):
     k = sp.add_parser('keys', help='key combos, e.g. cmd+tab, ctrl+tab, cmd+shift+4, return, esc')
     k.add_argument('combo', nargs='+'); k.add_argument('--force', action='store_true')
     k.add_argument('--app', metavar='NAME', help='activate this app first; refuse if it is not frontmost (recommended)')
+    r = sp.add_parser('restart', help='restart this Mac; with FileVault, skip the disk password screen once (authrestart)')
+    g = r.add_mutually_exclusive_group(required=True)
+    g.add_argument('--yes', action='store_true', help='really restart now')
+    g.add_argument('--dry-run', action='store_true', help='check FileVault, the password and sudo; do not restart')
+    r.add_argument('--force', action='store_true', help='restart even if someone seems to be using the Mac')
     a = p.parse_args(argv)
     os.umask(0o077)                       # shots and state may show private screen content
     os.makedirs(HOME, mode=0o700, exist_ok=True)
@@ -1225,7 +1373,7 @@ def main(argv=None):
     try:
         return {'status': cmd_status, 'unlock': cmd_unlock, 'lock': cmd_lock, 'shot': cmd_shot,
                 'click': lambda a: cmd_mouse(a, 'click'), 'move': lambda a: cmd_mouse(a, 'move'),
-                'type': cmd_type, 'keys': cmd_keys}[a.cmd](a)
+                'type': cmd_type, 'keys': cmd_keys, 'restart': cmd_restart}[a.cmd](a)
     except Fail as e:
         print(f'mac-remote: {e}', file=sys.stderr)
         return 1

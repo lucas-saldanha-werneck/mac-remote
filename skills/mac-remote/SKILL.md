@@ -1,7 +1,7 @@
 ---
 name: mac-remote
-description: See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and something on it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen.
-argument-hint: "[status|unlock|shot|click|move|type|keys|lock]"
+description: See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and something on it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").
+argument-hint: "[status|unlock|shot|click|move|type|keys|lock|restart]"
 ---
 
 # mac-remote: the Mac's screen from a distance (local VNC)
@@ -23,6 +23,10 @@ macOS locks the screen again about 1 s after the VNC session that unlocked it di
    - Prefer **`--app NAME`**: brings the app to the front and refuses if another app stays in front.
 5. `shot` again to check the result.
 6. **Always finish with `mac-remote lock`**: the holder drops the connection and macOS locks by itself. If it does not, the command falls back to Ctrl+Cmd+Q over VNC, then `pmset displaysleepnow`.
+
+## Restart
+
+`mac-remote restart --dry-run` first: it checks FileVault, authenticated-restart support and that sudo accepts the password, and restarts nothing. Then `mac-remote restart --yes` only after the user said to restart now, in this conversation. With FileVault on it uses `fdesetup authrestart`, so the Mac does not stop at the disk password screen. Unsaved work in open apps can be lost: say so before `--yes`. After it, wait a few minutes and run `mac-remote status`. Do not use `--force` (someone at the Mac) unless the user said yes.
 
 ## Safety
 
