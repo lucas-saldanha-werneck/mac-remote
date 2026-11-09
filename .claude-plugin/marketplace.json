@@ -9,7 +9,7 @@
     {
       "name": "mac-remote",
       "source": "./",
-      "description": "Lets Claude see and control your Mac through macOS Screen Sharing (VNC), even when the screen is locked: unlock, screenshot, click, type, lock again."
+      "description": "Lets Claude see and control your Mac through Screen Sharing, even when it is locked."
     }
   ]
 }

@@ -55,8 +55,8 @@ dry-run: everything is ready; not restarting. `mac-remote restart --yes` restart
 In Claude Code:
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/mac-remote
-/plugin install mac-remote@mac-remote
+/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin install mac-remote@lucas-plugins
 ```
 
 Then, once, in a terminal or by asking Claude:
@@ -102,7 +102,7 @@ The command runs with a shell, only when a new VNC login is needed. Its output i
 
 Keychain caveat: if macOS asks "allow access to this item?", nobody can click Allow while the screen is locked. Storing the item with the `security` command as shown means `security` can read it without asking. This was not tested while the screen was locked.
 
-## Options
+## Settings
 
 Environment variables override the config file. The config file accepts only `MAC_REMOTE_USER`, `MAC_REMOTE_PASS_CMD` and `MAC_REMOTE_RESTART_PRE_CMD`.
 
@@ -181,7 +181,7 @@ State lives in `~/.local/share/mac-remote/`: `holder.log` (what happened and why
 
 Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.config/mac-remote`. Turn Screen Sharing off if you do not use it otherwise.
 
-## Limits and what was not tested
+## Limits
 
 - Tests in `tests/` replace the VNC connection with fakes and never touch the screen: `python3 tests/test_mac_remote.py`. This release was also run on a real Mac (macOS 27, Apple silicon, U.S. International layout): `status` and `shot` on the locked screen, `unlock` (11 s), `shot`, `click`, `type` key by key, `type` by paste with `' " ~ ^`, `keys`, and `lock` (the Mac re-locked in about 1 to 2 s).
 - The tests ran on one Mac with Python 3.14 and 3.15. Other macOS versions, Intel Macs and setups with several users were not tested.
