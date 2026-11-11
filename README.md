@@ -55,7 +55,7 @@ dry-run: everything is ready; not restarting. `mac-remote restart --yes` restart
 In Claude Code:
 
 ```
-/plugin marketplace add lucas-saldanha-werneck/claude-plugins
+/plugin marketplace add lucas-saldanha-werneck/lucas-tools
 /plugin install mac-remote@lucas-tools
 ```
 
