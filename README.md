@@ -56,7 +56,7 @@ In Claude Code:
 
 ```
 /plugin marketplace add lucas-saldanha-werneck/claude-plugins
-/plugin install mac-remote@lucas-plugins
+/plugin install mac-remote@lucas-tools
 ```
 
 Then, once, in a terminal or by asking Claude:
