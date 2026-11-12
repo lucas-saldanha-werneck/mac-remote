@@ -175,9 +175,10 @@ State lives in `~/.local/share/mac-remote/`: `holder.log` (what happened and why
 ## Uninstall
 
 ```
-/plugin uninstall mac-remote@mac-remote
-/plugin marketplace remove mac-remote
+/plugin uninstall mac-remote@lucas-tools
 ```
+
+If you added the `lucas-tools` catalog only for mac-remote, you can also remove it with `/plugin marketplace remove lucas-tools` (this removes every plugin from that catalog).
 
 Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.config/mac-remote`. Turn Screen Sharing off if you do not use it otherwise.
 
@@ -189,7 +190,7 @@ Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.c
 - Not tested: the holder rejecting a socket client from another user (only reading the peer's user id was tested), and a real VNC drop in the middle of a held session.
 - Passwords with characters VNC cannot type are refused at unlock time. So are passwords with `' " ` ~ ^` when the selected keyboard layout has dead keys (U.S. International, ABNT and similar), because typed key by key those characters can change or vanish and cause two wrong attempts. mac-remote reads your selected layout, not the lock screen's; see `MAC_REMOTE_ALLOW_DEAD_KEY_PASSWORD`.
 - Clipboard save and restore was tested live with text only (the text came back after a paste); images and files were tested with fakes and a private pasteboard. Data that an app only provides on request (some promised files) may not come back.
-- `restart` was tested only with fake `fdesetup`, `sudo`, `sysadminctl` and `shutdown` on `PATH`; the tests never restart anything. It was not run on a real Mac in this release. The steps follow the `fdesetup` manual page (`authrestart -inputplist` with `Username` and `Password` keys) and a script the author used on his own Mac.
+- `restart` calls `/usr/bin/sudo`, `/usr/bin/fdesetup`, `/usr/sbin/sysadminctl` and `/sbin/shutdown` by absolute path, never through `PATH`. It was tested only with fakes in their place; the tests never restart anything. It was not run on a real Mac in this release. The steps follow the `fdesetup` manual page (`authrestart -inputplist` with `Username` and `Password` keys) and a script the author used on his own Mac.
 - Not tested in the Claude desktop app or on claude.ai. Per the Claude Code docs, claude.ai and Cowork do not install plugins that have a top-level `bin/` folder.
 
 ## License

@@ -10,7 +10,7 @@ The Mac password comes from MAC_REMOTE_PASS_CMD (a command that prints it, e.g. 
 password manager or the macOS Keychain) or from the MAC_REMOTE_PASS environment variable.
 It is fetched only when a new VNC login is needed, and is never printed, logged, written
 to disk, pasted, or put on a command line."""
-import argparse, asyncio, contextlib, fcntl, json, os, plistlib, pwd, re, signal, socket, struct, subprocess, sys, time
+import argparse, asyncio, contextlib, fcntl, json, os, plistlib, pwd, re, signal, socket, struct, subprocess, sys, tempfile, time
 
 HOME = os.path.expanduser(os.environ.get('MAC_REMOTE_HOME') or os.path.join(
     os.environ.get('XDG_DATA_HOME') or '~/.local/share', 'mac-remote'))
@@ -30,15 +30,17 @@ def sock_path(home):
     return os.path.join('/tmp', f'mac-remote-{os.getuid()}', 'holder.sock')
 
 
-def ensure_sock_dir():
-    """Create the socket folder if needed; refuse a folder another user owns or others can open."""
+def ensure_sock_dir(create=True):
+    """Create the socket folder if needed; refuse a folder another user owns or others can open.
+    The holder calls it before listening, and clients (create=False) before connecting."""
     d = os.path.dirname(SOCK)
     if d == HOME:
         return
-    try:
-        os.mkdir(d, 0o700)
-    except FileExistsError:
-        pass
+    if create:
+        try:
+            os.mkdir(d, 0o700)
+        except FileExistsError:
+            pass
     st = os.lstat(d)
     import stat as _stat
     if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
@@ -89,11 +91,16 @@ def hid_idle():
 
 
 def write_json(path, obj):
-    tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(obj, f)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    """Atomic write with a temp file of its own (mode 600), so two writers never share one."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.' + os.path.basename(path) + '.')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(obj, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        rm(tmp)
+        raise
 
 
 def read_json(path):
@@ -456,8 +463,7 @@ def render_shot(px, screens, path, display):
     meta = {'path': path, 'scale': scale, 'offset': [ox, oy], 'image_size': list(img.size),
             'framebuffer': [fbw, fbh], 'displays_fb': screens, 'display': display, 'time': time.time(),
             'locked': is_locked()}
-    with open(LAST_SHOT, 'w') as f:
-        json.dump(meta, f)
+    write_json(LAST_SHOT, meta)
     lines = [path, f"image {img.width}x{img.height}, scale {scale:.4f}, offset {ox},{oy}; locked: {'yes' if meta['locked'] else 'no'}"]
     for i, s in enumerate(screens):
         lines.append(f'display {i}: framebuffer rect x={s[0]} y={s[1]} w={s[2]} h={s[3]}'
@@ -619,6 +625,10 @@ class Holder:
                     if self.phase != 'held':
                         raise Fail(f'holder is not ready (phase {self.phase})')
                     async with self.req_lock:
+                        if r.get('deadline') and time.time() > float(r['deadline']):
+                            # The client already gave up (and may have restored its clipboard): a late
+                            # Cmd+V or click must not happen.
+                            raise Fail(f'{cmd} waited too long behind another request; not run')
                         self.last_command_at = time.time()
                         out = await (do_shot(self.s, r) if cmd == 'shot' else do_input(self.s, r, one_off=False))
                         self.last_command_at = time.time()
@@ -792,6 +802,12 @@ def holder_call(req, timeout=10.0):
     """Send one request. Returns the response dict, or None if no holder is listening."""
     if not os.path.exists(SOCK):
         return None
+    try:
+        ensure_sock_dir(create=False)           # the /tmp fallback folder must be ours and private
+    except FileNotFoundError:
+        return None
+    # The holder drops the request if it only gets to it after we stopped waiting.
+    req = dict(req, deadline=time.time() + max(0.5, timeout - 1.0))
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -1197,8 +1213,15 @@ def say(msg):
     restart_log(msg)
 
 
+# By absolute path, never through PATH: sudo gets the Mac password on stdin.
+SUDO = '/usr/bin/sudo'
+FDESETUP = '/usr/bin/fdesetup'
+SYSADMINCTL = '/usr/sbin/sysadminctl'
+SHUTDOWN = '/sbin/shutdown'
+
+
 def run_tool(args, stdin=None, timeout=60, with_stderr=False):
-    """Run a system tool found on PATH. Returns (rc, stdout). Its stderr is discarded unless asked
+    """Run a system tool (callers pass absolute paths). Returns (rc, stdout). Its stderr is discarded unless asked
     for (with sudo -S it could echo what it read). A missing tool is rc 127."""
     try:
         r = subprocess.run(args, input=stdin, stdout=subprocess.PIPE,
@@ -1214,8 +1237,8 @@ def sudo_validate(password):
     """Check the password with sudo (read from stdin, never argv) and leave a fresh sudo ticket.
     `sudo -k` runs on its own first: combined with -v, real sudo checks the password but does not
     cache a ticket (man sudo, -k), and the later `sudo -n` would fail."""
-    run_tool(['sudo', '-k'])
-    rc, _ = run_tool(['sudo', '-S', '-p', '', '-v'], stdin=(password + '\n').encode(), timeout=30)
+    run_tool([SUDO, '-k'])
+    rc, _ = run_tool([SUDO, '-S', '-p', '', '-v'], stdin=(password + '\n').encode(), timeout=30)
     return rc == 0
 
 
@@ -1248,7 +1271,7 @@ def run_pre_command(pre):
 
 def check_filevault_user(user):
     """Needs root: runs under the sudo ticket just validated. Output lines are `shortname,UUID`."""
-    rc, out = run_tool(['sudo', '-n', 'fdesetup', 'list'])
+    rc, out = run_tool([SUDO, '-n', FDESETUP, 'list'])
     if rc != 0:
         raise Fail(f'could not list the FileVault users (sudo -n fdesetup list, exit {rc}); not restarting')
     users = [line.split(',', 1)[0].strip() for line in out.splitlines() if line.strip()]
@@ -1263,21 +1286,21 @@ def cmd_restart(a):
     next boot, so the Mac does not stop at the FileVault password screen. With FileVault off:
     `shutdown -r now`. The password goes to sudo and fdesetup on stdin only."""
     restart_log(f"restart {'--dry-run' if a.dry_run else '--yes'} requested")
-    rc, out = run_tool(['fdesetup', 'isactive'])
+    rc, out = run_tool([FDESETUP, 'isactive'])
     if rc == 127:
         raise Fail('fdesetup not found (macOS only)')
     if out not in ('true', 'false'):
         raise Fail(f'could not read the FileVault state (fdesetup isactive printed {out[:40]!r}, exit {rc})')
     filevault = out == 'true'
     if filevault:
-        rc, out = run_tool(['fdesetup', 'supportsauthrestart'])
+        rc, out = run_tool([FDESETUP, 'supportsauthrestart'])
         if out != 'true':
             raise Fail('FileVault is on, but this Mac does not support an authenticated restart '
                        '(fdesetup supportsauthrestart). A restart would stop at the disk password screen.')
         say('FileVault: on; authenticated restart supported (the disk unlocks once at the next boot)')
     else:
         say('FileVault: off; a normal restart (shutdown -r now)')
-        rc, out = run_tool(['sysadminctl', '-autologin', 'status'], with_stderr=True)  # it prints to stderr
+        rc, out = run_tool([SYSADMINCTL, '-autologin', 'status'], with_stderr=True)  # it prints to stderr
         if 'automatic login user' not in out.lower():
             say('warning: automatic login looks off, so the Mac will stop at the login window after the restart')
     user, me = mac_user(), real_user()
@@ -1298,7 +1321,7 @@ def cmd_restart(a):
             say('dry-run: everything is ready; not restarting. `mac-remote restart --yes` restarts.')
             return 0
         if pre:
-            run_tool(['sudo', '-k'])                  # no sudo ticket while the pre-command runs
+            run_tool([SUDO, '-k'])                  # no sudo ticket while the pre-command runs
             run_pre_command(pre)
             if not sudo_validate(password):
                 raise Fail('sudo did not accept the password after the pre-restart command; not restarting')
@@ -1306,13 +1329,13 @@ def cmd_restart(a):
         if filevault:
             plist = plistlib.dumps({'Username': user, 'Password': password})
             say('restarting now with fdesetup authrestart')
-            rc, _ = run_tool(['sudo', '-n', 'fdesetup', 'authrestart', '-inputplist'], stdin=plist, timeout=120)
+            rc, _ = run_tool([SUDO, '-n', FDESETUP, 'authrestart', '-inputplist'], stdin=plist, timeout=120)
         else:
             say('restarting now with shutdown -r now')
-            rc, _ = run_tool(['sudo', '-n', 'shutdown', '-r', 'now'], timeout=120)
+            rc, _ = run_tool([SUDO, '-n', SHUTDOWN, '-r', 'now'], timeout=120)
     finally:
         password = None
-        run_tool(['sudo', '-k'])
+        run_tool([SUDO, '-k'])
     if rc != 0:
         raise Fail(f'the restart command failed (exit {rc}); the Mac was not restarted. See {RESTART_LOG}')
     say('restart command accepted; this Mac is going down. Wait a few minutes, then run `mac-remote status`.')

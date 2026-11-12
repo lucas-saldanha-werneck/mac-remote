@@ -589,7 +589,7 @@ FAKE_SUDO = r'''#!/bin/bash
 # read with -S against $FAKE_SUDO_PASS, keeps a "ticket" file, and runs only tools from this folder.
 # Like real sudo (man sudo, -k): `-k` alone drops the ticket; `-k` with -v or a command checks the
 # password but does NOT cache a ticket.
-D="$FAKE_DIR"; echo "sudo $*" >> "$D/calls"
+D="$FAKE_DIR"; L="sudo $*"; echo "${L//$D\//}" >> "$D/calls"
 S=0; K=0; V=0; N=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -609,7 +609,10 @@ if [ $ok = 0 ] && [ $S = 1 ]; then
 fi
 [ $ok = 1 ] || exit 1
 [ $# -eq 0 ] && exit 0
-exec "$(dirname "$0")/$1" "${@:2}"
+case "$1" in
+  "$D"/*) exec "$@" ;;
+  *) echo "refused to run $1" >> "$D/calls"; exit 99 ;;
+esac
 '''
 FAKE_FDESETUP = r'''#!/bin/bash
 D="$FAKE_DIR"; echo "fdesetup $*" >> "$D/calls"
@@ -631,7 +634,8 @@ def read_text(path):
 
 
 class Restart(unittest.TestCase):
-    """`restart` with fake fdesetup, sudo, sysadminctl and shutdown first on PATH. Nothing restarts."""
+    """`restart` with fake fdesetup, sudo, sysadminctl and shutdown in place of the absolute paths
+    mac_remote calls. Nothing restarts, and the real sudo is never run."""
     def setUp(self):
         import pwd
         self.d = tempfile.mkdtemp(prefix='restart-', dir=TMP)
@@ -646,6 +650,11 @@ class Restart(unittest.TestCase):
             'FAKE_SUDO_PASS': SECRET, 'MAC_REMOTE_PASS_CMD': f"printf '{SECRET}\\n'",
             'FAKE_OUT': 'Automatic login user: you'})
         self.env.start()
+        self.tools = [mock.patch.object(mr, attr, os.path.join(self.d, name)) for attr, name in
+                      (('SUDO', 'sudo'), ('FDESETUP', 'fdesetup'), ('SYSADMINCTL', 'sysadminctl'),
+                       ('SHUTDOWN', 'shutdown'))]
+        for t in self.tools:
+            t.start()
         self.me = pwd.getpwuid(os.getuid()).pw_name
         os.environ['FAKE_FV_USERS'] = self.me
         for k in ('MAC_REMOTE_PASS', 'MAC_REMOTE_USER', 'MAC_REMOTE_RESTART_PRE_CMD', 'FAKE_FV', 'FAKE_AUTHRESTART'):
@@ -657,6 +666,8 @@ class Restart(unittest.TestCase):
 
     def tearDown(self):
         self.idle.stop()
+        for t in self.tools:
+            t.stop()
         self.env.stop()
 
     def run_cmd(self, *args):
@@ -842,6 +853,149 @@ class Restart(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('the restart command failed (exit 2)', err)
         self.assertFalse(self.ticket(), 'ticket dropped after a failed restart command')
+
+
+class Audit2(unittest.TestCase):
+    """Findings of the second audit (MR-01 .. MR-07)."""
+
+    @unittest.skipUnless(os.environ.get('CI'), 'only in CI')
+    def test_ci_runs_with_the_real_dependencies(self):            # MR-01
+        self.assertTrue(REAL_ASYNCVNC, 'CI must install requirements.txt (asyncvnc is a fake here)')
+        import numpy, PIL, Quartz  # noqa: F401
+
+    def handle(self, h, req):
+        class Reader:
+            async def readline(self):
+                return (json.dumps(req) + '\n').encode()
+
+        class Writer(FakeWriter):
+            def get_extra_info(self, name):
+                return None
+
+            async def drain(self):
+                pass
+
+        w = Writer()
+        with mock.patch.object(mr, 'peer_uid', return_value=os.getuid()), \
+                mock.patch.object(h, 'save'), contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(h.handle(Reader(), w))
+        return json.loads(w.data)
+
+    def test_holder_drops_a_request_whose_client_gave_up(self):  # MR-02
+        h = mr.Holder(600)
+        h.phase, h.s = 'held', FakeSession()
+        with mock.patch.object(mr, 'do_input', new=mock.AsyncMock(return_value='done')) as di:
+            resp = self.handle(h, {'cmd': 'keys', 'combos': [], 'deadline': time_now() - 1})
+            di.assert_not_called()
+            self.assertFalse(resp['ok'])
+            self.assertIn('not run', resp['error'])
+            resp = self.handle(h, {'cmd': 'keys', 'combos': [], 'deadline': time_now() + 30})
+            di.assert_called_once()
+            self.assertTrue(resp['ok'])
+
+    def test_client_sends_a_deadline_before_its_own_timeout(self):  # MR-02
+        import socket, threading
+        d = tempfile.mkdtemp(prefix='s', dir='/tmp')
+        os.chmod(d, 0o700)
+        path = os.path.join(d, 'h.sock')
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        got = {}
+
+        def serve():
+            c, _ = srv.accept()
+            got['req'] = json.loads(c.makefile().readline())
+            c.sendall(b'{"ok": true, "out": "x"}\n')
+            c.close()
+
+        t = threading.Thread(target=serve)
+        t.start()
+        try:
+            with mock.patch.object(mr, 'SOCK', path):
+                before = time_now()
+                self.assertEqual(mr.via_holder({'cmd': 'keys', 'combos': []}, 30), 'x')
+        finally:
+            t.join(5)
+            srv.close()
+        self.assertIn('deadline', got['req'])
+        self.assertGreater(got['req']['deadline'], before)
+        self.assertLess(got['req']['deadline'], before + 30)
+
+    def test_system_tools_are_called_by_absolute_path(self):     # MR-03
+        calls = []
+
+        def fake_tool(args, stdin=None, timeout=60, with_stderr=False):
+            calls.append(list(args))
+            name = os.path.basename(args[0])
+            if name == 'fdesetup':
+                return 0, 'true'
+            if args[:2] == [mr.SUDO, '-n'] and os.path.basename(args[2]) == 'fdesetup':
+                return 0, f'{mr.real_user()},X'
+            return 0, ''
+
+        with mock.patch.object(mr, 'run_tool', side_effect=fake_tool), \
+                mock.patch.object(mr, 'get_password', return_value=SECRET), \
+                mock.patch.object(mr, 'user_active', return_value=(False, 300.0)), \
+                mock.patch.object(mr, 'mac_user', side_effect=mr.real_user), \
+                mock.patch.object(mr, 'load_config', return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            mr.cmd_restart(types.SimpleNamespace(dry_run=True, yes=False, force=False))
+        self.assertTrue(calls)
+        for c in calls:
+            self.assertTrue(os.path.isabs(c[0]), c)
+            if os.path.basename(c[0]) == 'sudo' and '-n' in c:
+                self.assertTrue(os.path.isabs(c[c.index('-n') + 1]), c)
+        self.assertEqual(mr.SUDO, '/usr/bin/sudo')
+        self.assertEqual(mr.FDESETUP, '/usr/bin/fdesetup')
+
+    def test_write_json_uses_its_own_temp_file(self):            # MR-04
+        d = tempfile.mkdtemp(dir=TMP)
+        p = os.path.join(d, 'x.json')
+        os.mkdir(p + '.tmp')                 # another writer's fixed temp name is in the way
+        mr.write_json(p, {'a': 1})
+        self.assertEqual(json.load(open(p)), {'a': 1})
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(os.listdir(d)), ['x.json', 'x.json.tmp'])
+
+    def test_readme_uninstall_uses_the_catalog_name(self):       # MR-05
+        text = read_text(os.path.join(ROOT, 'README.md'))
+        self.assertNotIn('mac-remote@mac-remote', text)
+        self.assertIn('/plugin uninstall mac-remote@lucas-tools', text)
+
+    def test_last_shot_is_written_atomically(self):              # MR-06
+        try:
+            import numpy as np
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest('numpy/pillow not installed')
+        px = np.zeros((20, 40, 4), dtype=np.uint8)
+        with mock.patch.object(mr, 'is_locked', return_value=False), \
+                mock.patch.object(mr, 'write_json', wraps=mr.write_json) as wj:
+            mr.render_shot(px, [(0, 0, 40, 20)], os.path.join(TMP, 's.jpg'), None)
+        wj.assert_called_once()
+        self.assertEqual(wj.call_args[0][0], mr.LAST_SHOT)
+
+    def test_client_refuses_a_socket_folder_open_to_others(self):  # MR-07
+        import socket
+        d = tempfile.mkdtemp(prefix='s', dir='/tmp')
+        os.chmod(d, 0o755)
+        path = os.path.join(d, 'h.sock')
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        try:
+            with mock.patch.object(mr, 'SOCK', path), \
+                    mock.patch.object(mr.socket.socket, 'connect', side_effect=AssertionError('connected')):
+                with self.assertRaises(mr.Fail):
+                    mr.holder_call({'cmd': 'ping'})
+        finally:
+            srv.close()
+
+
+def time_now():
+    import time
+    return time.time()
 
 
 class Cli(unittest.TestCase):
