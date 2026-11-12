@@ -404,25 +404,31 @@ async def mouse_click(c, button=0):
 
 
 async def type_password(s, pw, stopped=lambda: False):
-    """stopped() is checked before every password key and before Return; if it turns true the
-    partial input is not submitted (the next attempt clears it with BackSpace)."""
+    """stopped() and is_locked() are checked before the first key, before every password key and
+    before Return; if stop is requested, or someone unlocked the Mac in the meantime (Touch ID at the
+    desk), the partial input is not submitted (the next attempt clears it with BackSpace) and the
+    password never goes on into the app that is now in front."""
     c = s.c
-    def check():
+    def check(step):
         if stopped():
             raise Fail('stop requested while typing the password; it was not submitted')
-    check()
+        if not is_locked():
+            raise Fail(f'the screen is no longer locked (unlocked at the Mac?); stopped before {step}, '
+                       'password not submitted')
+    check('waking the lock screen')
     await press(c, 'Shift_L')                    # wake the lock screen (proven)
     await asyncio.sleep(1.5)
+    check('clearing the password field')
     for _ in range(len(pw) + 8):                 # clear leftovers of an earlier, partial attempt
         await press(c, 'BackSpace')
         await asyncio.sleep(0.03)
     await asyncio.sleep(0.4)
     for ch in pw:
-        check()
+        check('typing the password')
         await press(c, ch)
         await asyncio.sleep(KEY_GAP)
     await asyncio.sleep(0.4)
-    check()
+    check('pressing Return')
     await press(c, 'Return')
 
 

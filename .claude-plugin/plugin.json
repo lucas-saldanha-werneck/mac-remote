@@ -1,6 +1,6 @@
 {
   "name": "mac-remote",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Lets Claude see and control your Mac through Screen Sharing, even when it is locked.",
   "author": {
     "name": "Lucas Saldanha Werneck",
