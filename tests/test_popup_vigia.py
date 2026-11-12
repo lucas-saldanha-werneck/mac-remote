@@ -60,36 +60,63 @@ class ReadButtons(unittest.TestCase):
                           'Claude Code connects to servers and devices',
                           'on your local network when commands you run',
                           'need to reach them.'], ["Don't Allow", 'Allow'])
-        text, botao, alvo = pv.ler_botoes(path, box)
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
         self.assertEqual(botao, 'Allow', text)
         self.assertGreater(alvo[0], 120)             # right of "Don't Allow" (which ends near x=115)
         self.assertGreater(alvo[1], box[3] * 0.5)    # in the lower half
-        self.assertFalse(pv.proibido(text))
+        self.assertIsNone(bloq, text)
 
     def test_ocr_noise_without_letters_is_ignored(self):
         path, box = card(['Allow "claude" to find devices on local networks?', 'Some explanation text.'],
                          ["Don't Allow", 'Allow'], noise=True)
-        text, botao, alvo = pv.ler_botoes(path, box)
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
         self.assertEqual(botao, 'Allow', text)
 
-    def test_keychain_popup_is_forbidden_and_has_no_allow_button(self):
-        path, box = card(['Keychain Not Found', 'A keychain could not be found to store the password.'],
-                         ['Reset To Defaults', 'Cancel', 'OK'])
-        text, botao, alvo = pv.ler_botoes(path, box)
-        self.assertTrue(pv.proibido(text), text)
+    def test_keychain_popup_is_blocked(self):
+        path, box = card(['Keychain Not Found', 'A keychain cannot be found to store the password.'],
+                         ['Cancel', 'Reset To Defaults'])
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertTrue(bloq, text)
+
+    def test_keychain_popup_row_alone_is_blocked(self):
+        """Even without the title phrases, a row 'Cancel  Reset To Defaults' blocks (rule a)."""
+        path, box = card(['Something happened', 'Please choose.'], ['Cancel', 'Reset To Defaults'])
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertTrue(bloq, text)
+
+    def test_reset_in_body_does_not_block_a_normal_popup(self):
+        path, box = card(['Allow "claude" to find devices on local networks?',
+                          'Terminal: popup-vigia reset',
+                          'Claude Code connects to servers on your network.'], ["Don't Allow", 'Allow'])
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertIn('reset', text.lower())
+        self.assertIsNone(bloq, text)
+        self.assertEqual(botao, 'Allow', text)
+
+    def test_dont_allow_reset_row_is_not_clicked(self):
+        path, box = card(['Some title', 'Some body text here.'], ["Don't Allow", 'Reset'])
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertTrue(bloq, text)
 
     def test_sentence_quoting_the_words_is_not_the_button_row(self):
         path, box = card(['Notice', "Tap Don't Allow or Allow when asked to continue."], ['Close'])
-        text, botao, alvo = pv.ler_botoes(path, box)
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
         self.assertIsNone(botao, text)
 
 
 class Forbidden(unittest.TestCase):
-    def test_words(self):
-        for t in ('Keychain Not Found', 'Reset To Defaults', 'Erase all data', 'delete file', 'Apagar', 'REDEFINIR', 'restaurar'):
-            self.assertTrue(pv.proibido(t), t)
-        for t in ('Allow "claude" to find devices on local networks?', '', None):
-            self.assertFalse(pv.proibido(t), t)
+    def test_keychain_phrases(self):
+        for t in ('Keychain Not Found', 'KEYCHAIN  NOT\nFOUND', 'A keychain cannot be found to store', 'a Keychain can not be found'):
+            self.assertTrue(pv.frase_keychain(t), t)
+        for t in ('Allow "claude" to find devices on local networks?', 'popup-vigia reset', 'my keychain is fine', '', None):
+            self.assertFalse(pv.frase_keychain(t), t)
+
+    def test_button_row_rule(self):
+        self.assertTrue(pv.linha_de_botoes_proibida(['cancel', 'reset', 'to', 'defaults'], 0.2))   # cancel: any height
+        self.assertTrue(pv.linha_de_botoes_proibida(["don't", 'allow', 'delete'], 0.7))
+        self.assertTrue(pv.linha_de_botoes_proibida(['reset'], 0.8))
+        self.assertFalse(pv.linha_de_botoes_proibida(['run', 'popup-vigia', 'reset', 'to', 'clear', 'locks'], 0.2))
+        self.assertFalse(pv.linha_de_botoes_proibida(["don't", 'allow', 'allow'], 0.7))
 
     def test_forbidden_window_is_never_clicked(self):
         """trata_janela with a window whose text says keychain: it must journal 'bloqueada' and never call click."""
@@ -105,7 +132,7 @@ class Forbidden(unittest.TestCase):
         tent = {}
         with mock.patch.object(pv, 'telas', return_value=[[0, 0, 1600, 1000]]), \
              mock.patch.object(pv, 'foto', return_value=(meta, '')), \
-             mock.patch.object(pv, 'ler_botoes', return_value=('Keychain Not Found\nReset To Defaults OK', 'OK', (300.0, 350.0))), \
+             mock.patch.object(pv, 'ler_botoes', return_value=('Keychain Not Found\nCancel Reset To Defaults', 'OK', (300.0, 350.0), 'Keychain phrase in the text')), \
              mock.patch.object(pv, 'run', side_effect=fake_run):
             pv.trata_janela(win, tent, set())
         self.assertFalse([c for c in calls if 'click' in c], calls)
