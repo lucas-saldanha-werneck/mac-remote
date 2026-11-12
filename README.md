@@ -146,6 +146,31 @@ The password is never printed, logged or put on a command line. Each step goes t
 
 After the restart, wait a few minutes and run `mac-remote status`. If the Mac stopped at the login window (FileVault off, no automatic login), `mac-remote unlock` can type the password there; that path was not tested.
 
+## popup-vigia: answer permission popups while you are away
+
+`bin/popup-vigia` is an optional watcher. Every 60 s (from launchd) it looks for a macOS permission
+popup ("Allow ... to find devices on local networks?") and, when nobody has touched the Mac for 120 s,
+clicks **Allow** through `mac-remote`, unlocking and re-locking the screen if needed. Each click is
+recorded (window text plus a photo before and after) in `~/Library/Logs/popup-vigia/`.
+
+It finds the window from the system window list (owner must be a system process under `/System/`),
+reads the button row with `tesseract` (`brew install tesseract`), and only clicks an `Allow`/`OK` that sits
+to the right of `Don't Allow`/`Deny`. **A window whose text mentions reset, keychain, erase or delete is
+never clicked**, even if it has an Allow or OK button.
+
+Run it with the mac-remote virtualenv Python (it needs Quartz and Pillow):
+
+```sh
+~/.local/share/mac-remote/.venv/bin/python /path/to/mac-remote/bin/popup-vigia          # one round
+~/.local/share/mac-remote/.venv/bin/python /path/to/mac-remote/bin/popup-vigia status    # locks and counters
+```
+
+Optional `~/.config/popup-vigia/config` (`KEY=VALUE` lines): `NOTIFY_CMD` (a command run as
+`command "<message>"` to notify you; default none, messages go to `rodadas.log`), `NOTIFY_OK` (text the
+command must print to count as delivered), `TESSERACT` (path). Other commands: `log [N]`, `reset`,
+`sync-config` (copies the mac-remote config out of a synced folder, so launchd does not trigger a
+permission popup while reading it).
+
 ## Requirements
 
 - macOS. The command exits with an error on other systems.

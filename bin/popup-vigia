@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+"""popup-vigia - clicks "Allow" on macOS permission popups while you are away, and keeps a record of
+every click (window text plus a photo before and after).
+
+Part of the mac-remote plugin: it takes the screenshots and clicks through the sibling `mac-remote`
+command (bin/mac-remote), so it must run with the mac-remote virtualenv Python (Quartz, PIL).
+Run it every 60 s from launchd (see README). It needs `tesseract` for OCR (brew install tesseract).
+
+It acts only when nobody has touched the Mac for 120 s and either a permission window is on screen,
+or the screen is locked and tcc-disjuntor counts a request stuck in sandboxd (optional state file).
+Known limit: with the screen locked, a window that is NOT a file prompt is only clicked once the
+screen opens for another reason.
+How it finds the window: from the system window list (owner = a system process under /System/),
+never from text. A web page imitating the buttons is not clicked.
+
+Safety (never weaken): a window whose text mentions reset / keychain / erase / delete is never clicked,
+even if it has an Allow or OK button ("Keychain Not Found" has "Reset To Defaults", which would wipe
+the keychain).
+
+Usage:
+  popup-vigia              one round
+  popup-vigia log [N]      last N clicks (default 10)
+  popup-vigia status       locks and counters
+  popup-vigia reset        clear locks (UNLOCK-FAILED / RELOCK-FAILED) and attempt counters
+  popup-vigia sync-config  copy the mac-remote config to a local folder (see below)
+
+Config (optional) ~/.config/popup-vigia/config, lines KEY=VALUE:
+  NOTIFY_CMD=/path/to/command      run as `command "<message>"` to notify you (default: no notification,
+                                   messages go only to rodadas.log). Env POPUP_VIGIA_NOTIFY overrides it.
+  NOTIFY_OK=text                   optional: text the command must print to count as delivered
+  TESSERACT=/path/to/tesseract     default: found on PATH or in /opt/homebrew/bin
+
+Files:
+  ~/Library/Logs/popup-vigia/cliques.jsonl  journal (an "intencao" line BEFORE the click, a "resultado" line after)
+  ~/Library/Logs/popup-vigia/img/           JPEG photos before and after
+  ~/Library/Logs/popup-vigia/rodadas.log    what each round did (only when it did something)
+  ~/.local/state/popup-vigia/               run lock, error locks, attempts per window
+(The journal keys and phase names stay in Portuguese so old journals keep working.)
+"""
+import fcntl
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.realpath(__file__))
+MR = os.environ.get("POPUP_VIGIA_MR") or os.path.join(HERE, "mac-remote")   # the sibling mac-remote command
+MR_LAST = HOME + "/.local/share/mac-remote/last-shot.json"
+MR_STATE = HOME + "/.local/share/mac-remote/state.json"      # {"last_input": t} written by mac-remote itself
+LOGDIR = os.environ.get("POPUP_VIGIA_LOGDIR") or HOME + "/Library/Logs/popup-vigia"
+IMG = LOGDIR + "/img"
+JOURNAL = LOGDIR + "/cliques.jsonl"
+RODADAS = LOGDIR + "/rodadas.log"
+ST = os.environ.get("POPUP_VIGIA_STATE") or HOME + "/.local/state/popup-vigia"
+C_STATE = HOME + "/.local/state/tcc-disjuntor/state.json"   # optional: {"sandboxd": N, "antigos": ...}
+CONF = os.environ.get("POPUP_VIGIA_CONFIG") or HOME + "/.config/popup-vigia/config"
+
+
+def load_config():
+    cfg = {}
+    try:
+        with open(CONF) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def notify_cmd():
+    return os.environ.get("POPUP_VIGIA_NOTIFY") or load_config().get("NOTIFY_CMD") or None
+
+
+def tesseract_path():
+    return (os.environ.get("TESSERACT") or load_config().get("TESSERACT") or shutil.which("tesseract")
+            or "/opt/homebrew/bin/tesseract")
+
+
+# mac-remote's config may live in a synced folder (e.g. Dropbox). Under launchd, reading it can raise a
+# permission window: the watcher would wait for the very window it has to click. So it uses a local copy
+# made by `popup-vigia sync-config`.
+MR_CONF_LOCAL = ST + "/mac-remote/config"
+
+
+def use_local_mr_config():
+    if os.path.isfile(MR_CONF_LOCAL):
+        os.environ["MAC_REMOTE_CONFIG"] = MR_CONF_LOCAL
+
+
+DONOS = ("UserNotificationCenter", "CoreServicesUIAgent", "universalAccessAuthWarn")  # window owners (checked on macOS 27.2)
+AFIRMATIVOS = ("allow", "ok")                           # the button I click (its pair is "Don't Allow" or "Deny")
+TRAVA_VENCE = 15 * 60   # VNC connection drop: try again after 15 min
+TRAVA_MAX_DIA = 3       # and at most 3 times a day
+# Block rule (never loosen). A window is never clicked if EITHER:
+#  (a) a button-row line has a forbidden word: the line must be in the lower half of the window and hold a
+#      button-like word (or be a short line), or any line with the token "cancel" (the Keychain popup's row
+#      is "Cancel  Reset To Defaults");
+#  (b) the exact Keychain phrases appear anywhere in the text.
+# A forbidden word elsewhere (the window is translucent, so OCR also reads the screen behind it) does not block.
+PROIBIDO = re.compile(r"reset|erase|delete|apagar|redefinir|restaurar", re.I)
+FRASES_KEYCHAIN = ("keychainnotfound", "akeychaincannotbefound", "akeychaincouldnotbefound")
+BOTAO_PALAVRAS = ("allow", "don't", "dont", "deny", "cancel", "ok")
+BOTAO_Y_MIN = 0.5       # the button row is below the middle of the window (measured: 0.69)
+IDLE_MIN = 120          # s with nobody touching the Mac
+MAX_JANELAS = 5         # per round
+MAX_TENTATIVAS = 3      # per window, across rounds
+FOTO_VALIDADE = 12.0    # s between the photo and the click (measured: photo + read = 5.6 s on the author's Mac)
+PRAZO_RODADA = 170      # s
+PRAZO_UNLOCK = int(os.environ.get("POPUP_VIGIA_PRAZO_UNLOCK") or 75)   # s (the variable is for tests only)
+LEASE = 90              # s: mac-remote locks the screen by itself after this long without commands
+CAO = 130               # s: forced lock, whatever happens
+JOURNAL_MAX = 5 * 1024 * 1024
+IMG_MAX = 200 * 1024 * 1024
+IMG_DIAS = 90
+
+
+def stamp(t=None):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t or time.time()))
+
+
+def rodada_log(text):
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    with open(RODADAS, "a") as f:
+        f.write("%s %s\n" % (stamp(), text))
+
+
+def run(cmd, timeout):
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return None, "", "timeout of %ss exceeded" % timeout
+    except OSError as e:
+        return None, "", str(e)
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def mtime(path):
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0
+
+
+def avisa(tipo, texto, cada=3600):
+    """Notify in a separate process (60 s limit) if NOTIFY_CMD is set. One delivered per type every `cada` s;
+    a failed one is retried after 5 min. Without NOTIFY_CMD the message only goes to rodadas.log.
+    NOTIFY_OK (optional) is a string the command must print to count as delivered."""
+    cmd = notify_cmd()
+    os.makedirs(ST, mode=0o700, exist_ok=True)
+    ok_f, try_f = "%s/aviso-%s.ok" % (ST, tipo), "%s/aviso-%s.try" % (ST, tipo)
+    if time.time() - mtime(ok_f) < cada or time.time() - mtime(try_f) < 300:
+        return
+    open(try_f, "w").close()
+    if not cmd:
+        open(ok_f, "w").close()
+        rodada_log("notice %s: %s" % (tipo, texto))
+        return
+    if os.environ.get("POPUP_VIGIA_SEM_AVISO"):
+        rodada_log("notice(not sent, test) %s: %s" % (tipo, texto))
+        return
+    if os.fork() != 0:
+        return
+    try:
+        os.setsid()
+        signal.alarm(0)
+        rc, out, _ = run(shlex.split(cmd) + [texto], 60)
+        want = os.environ.get("POPUP_VIGIA_NOTIFY_OK") or load_config().get("NOTIFY_OK") or ""
+        sent = rc == 0 and want in out
+        if sent:
+            open(ok_f, "w").close()
+        rodada_log("notice %s: %s" % (tipo, "sent" if sent else "FAILED rc=%s" % rc))
+    finally:
+        os._exit(0)
+
+
+# ---------- what the system says ----------
+def hid_idle():
+    rc, out, _ = run(["/usr/sbin/ioreg", "-c", "IOHIDSystem"], 10)
+    m = re.search(r'"HIDIdleTime" = (\d+)', out)
+    return int(m.group(1)) / 1e9 if m else None
+
+
+def humano_ativo():
+    """True if somebody touched the Mac in the last IDLE_MIN s. mac-remote's own touch
+    (unlock, click) does not count: it records the time of its last touch in state.json."""
+    idle = hid_idle()
+    if idle is None:
+        return True                                  # unknown -> do not act
+    if idle >= IDLE_MIN:
+        return False
+    nosso = load_json(MR_STATE, {}).get("last_input", 0)
+    return idle < time.time() - nosso - 2            # the last touch is newer than ours = a person
+
+
+def tela_bloqueada():
+    import Quartz
+    d = Quartz.CGSessionCopyCurrentDictionary() or {}
+    return bool(d.get("CGSSessionScreenIsLocked"))
+
+
+def janelas():
+    """Windows on screen, front to back."""
+    import Quartz
+    res = []
+    for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID) or []:
+        b = w.get("kCGWindowBounds") or {}
+        res.append({"id": int(w.get("kCGWindowNumber", 0)), "dono": str(w.get("kCGWindowOwnerName") or ""),
+                    "pid": int(w.get("kCGWindowOwnerPID", 0)), "camada": int(w.get("kCGWindowLayer", 0)),
+                    "alpha": float(w.get("kCGWindowAlpha", 1.0)),
+                    "box": [float(b.get("X", 0)), float(b.get("Y", 0)), float(b.get("Width", 0)), float(b.get("Height", 0))]})
+    return res
+
+
+def caminho_do_pid(pid):
+    rc, out, _ = run(["/bin/ps", "-o", "comm=", "-p", str(pid)], 5)
+    return out.strip()
+
+
+def janelas_de_permissao(todas):
+    achadas = []
+    for w in todas:
+        if w["dono"] in DONOS and w["box"][2] >= 200 and w["box"][3] >= 120:
+            w["caminho"] = caminho_do_pid(w["pid"])
+            if w["caminho"].startswith("/System/"):      # system processes only (folder protected by macOS)
+                achadas.append(w)
+    return achadas
+
+
+def telas():
+    """Displays in points, in system order (the same one mac-remote uses)."""
+    import Quartz
+    err, ids, n = Quartz.CGGetActiveDisplayList(16, None, None)
+    res = []
+    for i in ids[:n]:
+        b = Quartz.CGDisplayBounds(i)
+        res.append([b.origin.x, b.origin.y, b.size.width, b.size.height])
+    return res
+
+
+def holder_ativo():
+    rc, out, _ = run([MR, "status"], 20)
+    return "holder: RUNNING" in out
+
+
+def holder_parado_com_certeza():
+    """True only if mac-remote answered and said there is no open session. Error or timeout = unknown = False."""
+    rc, out, _ = run([MR, "status"], 20)
+    return rc == 0 and "holder: none" in out
+
+
+# ---------- journal ----------
+def journal(obj):
+    """Write one line and force it to disk. Raises OSError on failure (then nothing is clicked)."""
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    fd = os.open(JOURNAL, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, (json.dumps(obj, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def ler_journal():
+    linhas = []
+    try:
+        with open(JOURNAL, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    linhas.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return linhas
+
+
+def sem_resultado(linhas):
+    """Actions with 'intencao' and no 'resultado' = unknown outcome (I died midway)."""
+    fim = {l["id"] for l in linhas if l.get("fase") == "resultado"}
+    return [l for l in linhas if l.get("fase") == "intencao" and l["id"] not in fim]
+
+
+def manutencao():
+    """Disk limits: journal (5 MB, keeps actions without result) and photos (90 days, 200 MB)."""
+    try:
+        if os.path.getsize(JOURNAL) > JOURNAL_MAX:
+            pend = sem_resultado(ler_journal())
+            os.rename(JOURNAL, LOGDIR + "/cliques-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+            for l in pend:
+                journal(l)
+            velhos = sorted(f for f in os.listdir(LOGDIR) if f.startswith("cliques-"))
+            for f in velhos[:-10]:
+                os.remove(os.path.join(LOGDIR, f))
+    except OSError:
+        pass
+    try:
+        fotos = sorted((os.path.join(IMG, f) for f in os.listdir(IMG)), key=mtime)
+    except OSError:
+        return
+    total = sum(os.path.getsize(f) for f in fotos)
+    for f in fotos:
+        if time.time() - mtime(f) > IMG_DIAS * 86400 or total > IMG_MAX:
+            total -= os.path.getsize(f)
+            os.remove(f)
+
+
+# ---------- photo, reading, click ----------
+def foto(path, tela_idx):
+    """Screenshot of one display through mac-remote. Returns the scale/offset of THIS photo, or None."""
+    t0 = time.monotonic()
+    rc, out, err = run([MR, "shot", path, "--display", str(tela_idx)], 30)
+    if rc != 0:
+        return None, "shot failed: %s" % (err.strip() or out.strip())[:200]
+    meta = load_json(MR_LAST, {})
+    if meta.get("path") != os.path.abspath(path):
+        return None, "another screenshot got in between (last-shot.json is not mine)"
+    meta["mono"] = t0
+    return meta, ""
+
+
+def ler_botoes(img_path, caixa):
+    """OCR of the crop. Returns (text, button, (x, y) in the image, block reason or None)."""
+    from PIL import Image
+    im = Image.open(img_path).crop(caixa)
+    grande = im.resize((im.width * 3, im.height * 3), Image.LANCZOS)
+    os.makedirs(ST, mode=0o700, exist_ok=True)
+    tmp = "%s/ocr-%d.png" % (ST, os.getpid())
+    grande.save(tmp)
+    try:
+        rc, tsv, _ = run([tesseract_path(), tmp, "-", "--psm", "6", "tsv"], 30)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    if rc != 0:
+        return "", None, None, None
+    linhas = {}
+    for line in tsv.splitlines()[1:]:
+        c = line.split("\t")
+        if len(c) >= 12 and c[11].strip() and float(c[10]) >= 0:
+            linhas.setdefault((c[2], c[3], c[4]), []).append(
+                {"x": int(c[6]), "y": int(c[7]), "w": int(c[8]), "h": int(c[9]), "t": c[11].strip()})
+    texto = "\n".join(" ".join(p["t"] for p in ps) for ps in linhas.values())
+
+    def norm(s):
+        return s.lower().replace("’", "'").replace("‘", "'").strip(".,:;!?\"")
+
+    bloqueio = "Keychain phrase in the text" if frase_keychain(texto) else None
+    for ps in linhas.values():
+        letras = [p for p in ps if re.search(r"[A-Za-z]", p["t"])]
+        if letras and not bloqueio:
+            yc = sum(p["y"] + p["h"] / 2.0 for p in letras) / len(letras) / grande.height
+            if linha_de_botoes_proibida([norm(p["t"]) for p in letras], yc):
+                bloqueio = "forbidden word in a button row: %s" % " ".join(p["t"] for p in letras)
+    for ps in linhas.values():                       # both buttons are on the same line
+        # OCR noise with no letters ("," "(" "|") is not a word. The window is slightly transparent and OCR
+        # reads bits of the background: once a line came back as ", Don't Allow Allow" and the watcher gave up.
+        ps = [p for p in ps if re.search(r"[A-Za-z]", p["t"])]
+        toks = [norm(p["t"]) for p in ps]
+        usados = set()
+        for i in range(len(toks)):
+            if toks[i] == "deny":
+                usados.add(i)
+            if i + 1 < len(toks) and toks[i] in ("don't", "dont") and toks[i + 1] == "allow":
+                usados.update((i, i + 1))
+        if not usados:                               # no refuse button on this line: not the pair
+            continue
+        # The line must BE the button row, not a sentence in the window body that quotes the words.
+        # Measured on 7 real windows: line = "Don't Allow Allow", Allow button at 64% of the width and
+        # 69% of the height of the window.
+        resto = [i for i in range(len(toks)) if i not in usados]
+        if len(resto) != 1 or toks[resto[0]] not in AFIRMATIVOS:
+            continue                                 # other words on the line: it is text, not the button row
+        p = ps[resto[0]]
+        recusa_x = max(ps[i]["x"] + ps[i]["w"] for i in usados)
+        if p["x"] < recusa_x:
+            continue                                 # the accept button is to the RIGHT of the refuse one
+        if (p["y"] + p["h"] / 2.0) / grande.height < BOTAO_Y_MIN:
+            continue                                 # buttons are in the lower half of the window
+        cx = caixa[0] + (p["x"] + p["w"] / 2.0) / 3.0
+        cy = caixa[1] + (p["y"] + p["h"] / 2.0) / 3.0
+        return texto, p["t"], (cx, cy), bloqueio
+    return texto, None, None, bloqueio
+
+
+def atribuicao():
+    """Who asked for permission in the last 2 min, according to tccd. A hint, not proof."""
+    rc, out, _ = run(["/usr/bin/log", "show", "--last", "2m", "--style", "compact", "--predicate",
+                      'process == "tccd" AND eventMessage BEGINSWITH "AUTHREQ_ATTRIBUTION"'], 30)
+    vistos = []
+    for m in re.finditer(r"accessing=\{TCCDProcess: identifier=([^,]+), pid=(\d+).*?binary_path=([^},]+)", out):
+        item = {"identifier": m.group(1), "pid": int(m.group(2)), "binary_path": m.group(3)}
+        if item not in vistos:
+            vistos.append(item)
+    return vistos[-12:]
+
+
+def frase_keychain(texto):
+    """(b) the Keychain phrases, tolerant of curly quotes, OCR spacing and case."""
+    seco = re.sub(r"[^a-z]", "", (texto or "").lower())
+    return any(f in seco for f in FRASES_KEYCHAIN)
+
+
+def linha_de_botoes_proibida(toks, ycentro):
+    """(a) for one OCR line: tokens (lowercase) and the line's vertical centre as a fraction of the window."""
+    if not PROIBIDO.search(" ".join(toks)):
+        return False
+    if "cancel" in toks:
+        return True
+    if ycentro < BOTAO_Y_MIN:
+        return False
+    return any(t in BOTAO_PALAVRAS for t in toks) or len(toks) <= 3
+
+
+def proibido(texto):
+    """Text-only check, (b). The button-row check (a) is done inside ler_botoes, which sees the lines."""
+    return frase_keychain(texto)
+
+
+def trata_janela(w, tentativas, sem_repetir):
+    wid = str(w["id"])
+    if w["id"] in sem_repetir:
+        rodada_log("window %s: the last action has no known result; not repeating" % wid)
+        avisa("sem-resultado", "popup-vigia: I clicked a permission window and do not know the result. Look at the Mac screen.")
+        return
+    if tentativas.get(wid, 0) >= MAX_TENTATIVAS:
+        avisa("teimosa", "popup-vigia: tried %d times and the permission window is still on screen. Look at the Mac." % MAX_TENTATIVAS)
+        return
+    ts = telas()
+    cx, cy = w["box"][0] + w["box"][2] / 2, w["box"][1] + w["box"][3] / 2
+    idx = next((i for i, t in enumerate(ts) if t[0] <= cx < t[0] + t[2] and t[1] <= cy < t[1] + t[3]), None)
+    if idx is None:
+        rodada_log("window %s is outside all displays" % wid)
+        return
+    aid = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), wid)
+    os.makedirs(IMG, mode=0o700, exist_ok=True)
+    antes = "%s/%s-antes.jpg" % (IMG, aid)
+    meta, erro = foto(antes, idx)
+    if meta is None:
+        rodada_log("window %s: %s" % (wid, erro))
+        return
+    fbs = meta.get("displays_fb") or []
+    if idx >= len(fbs):
+        rodada_log("window %s: mac-remote does not have display %d" % (wid, idx))
+        return
+    fb, pt = fbs[idx], ts[idx]
+    k = fb[2] / pt[2]                                # framebuffer pixels per point on this display
+    if abs(k - fb[3] / pt[3]) > 0.02:
+        rodada_log("window %s: odd display ratio (%s x %s)" % (wid, fb, pt))
+        return
+    s, (ox, oy) = meta["scale"], meta["offset"]
+
+    def pt_para_img(x, y):
+        return ((fb[0] + (x - pt[0]) * k - ox) * s, (fb[1] + (y - pt[1]) * k - oy) * s)
+
+    x0, y0 = pt_para_img(w["box"][0], w["box"][1])
+    x1, y1 = pt_para_img(w["box"][0] + w["box"][2], w["box"][1] + w["box"][3])
+    caixa = [max(0, int(x0)), max(0, int(y0)), min(meta["image_size"][0], int(x1)), min(meta["image_size"][1], int(y1))]
+    texto, botao, alvo, bloqueio = ler_botoes(antes, caixa)
+    base = {"id": aid, "quando": stamp(), "dono": w["dono"], "dono_caminho": w["caminho"], "dono_pid": w["pid"],
+            "janela": w["id"], "janela_box_pontos": w["box"], "texto": texto, "antes": antes, "formato": "JPEG"}
+    # BLOCK (owner requirement): a window that mentions reset / keychain / erase is NEVER clicked.
+    # "Keychain Not Found" has a "Reset To Defaults" button, which creates a new, empty keychain.
+    if bloqueio:
+        journal(dict(base, fase="bloqueada", nota="text with a forbidden word (reset/keychain/erase); never clicked"))
+        tentativas[wid] = MAX_TENTATIVAS             # do not try this window again
+        rodada_log("window %s: BLOCKED (forbidden word), did not click; text: %s"
+                   % (wid, " / ".join(texto.split("\n"))[:200]))
+        avisa("bloqueada", "popup-vigia: there is a window I NEVER click (it mentions reset/keychain). "
+                           "Do not press Reset To Defaults. Text: %s" % texto[:300])
+        return
+    if botao is None:
+        journal(dict(base, fase="nao-suportada", nota="system window without the button pair I know; not clicked"))
+        tentativas[wid] = tentativas.get(wid, 0) + 1
+        rodada_log("window %s: do not know how to click it; text: %s" % (wid, " / ".join(texto.split("\n"))[:200]))
+        avisa("nao-suportada", "popup-vigia: there is a system window I do not know how to click. Text: %s" % texto[:300])
+        return
+    fbx, fby = alvo[0] / s + ox, alvo[1] / s + oy     # fixed coordinate for this action (does not depend on a later photo)
+    ptx, pty = pt[0] + (fbx - fb[0]) / k, pt[1] + (fby - fb[1]) / k
+    # 1) journal BEFORE the click. If it cannot be written, do not click.
+    try:
+        journal(dict(base, fase="intencao", botao=botao, fb=[round(fbx), round(fby)], ponto=[round(ptx), round(pty)],
+                     pedidos_presos_antes=load_json(C_STATE, {}).get("antigos")))
+    except OSError as e:
+        rodada_log("window %s: could NOT write the journal (%s); did not click" % (wid, e))
+        avisa("registro", "popup-vigia: cannot write the click journal (%s). Stopped clicking." % e)
+        return
+    tentativas[wid] = tentativas.get(wid, 0) + 1
+    if os.environ.get("POPUP_VIGIA_MORRE_APOS_REGISTRO"):     # tests only
+        os._exit(9)
+    # 2) check again: same window, same place, nothing in front of the button, fresh photo
+    agora = janelas()
+    pos = next((i for i, j in enumerate(agora) if j["id"] == w["id"]), None)
+    motivo = None
+    if pos is None or agora[pos]["box"] != w["box"]:
+        motivo = "the window vanished or moved"
+    else:
+        for j in agora[:pos]:
+            b = j["box"]
+            if j["dono"] == "Window Server" and b[2] <= 64 and b[3] <= 64:
+                continue                             # mouse pointer and indicators (28x40): they do not cover the button
+            if j["alpha"] > 0 and b[0] <= ptx < b[0] + b[2] and b[1] <= pty < b[1] + b[3]:
+                motivo = "another window is in front of the button (%s, layer %d)" % (j["dono"], j["camada"])
+                break
+    if motivo is None and time.monotonic() - meta["mono"] > FOTO_VALIDADE:
+        motivo = "stale screenshot (%.1f s)" % (time.monotonic() - meta["mono"])
+    if motivo:
+        journal({"id": aid, "quando": stamp(), "fase": "resultado", "resultado": "abortada", "motivo": motivo})
+        rodada_log("window %s: aborted: %s" % (wid, motivo))
+        return
+    # 3) click (mac-remote refuses by itself if a human touched the Mac)
+    rc, out, err = run([MR, "click", "--raw", str(round(fbx)), str(round(fby))], 30)
+    if rc != 0:
+        msg = (err.strip() or out.strip())
+        # "Not sent" is certain only when mac-remote REFUSED before touching the mouse (screen locked or
+        # a person at the Mac: its message has "refusing"). Any other error or timeout: the click may have
+        # arrived. It stays WITHOUT a result -> this window is not clicked again (sem_repetir) until
+        # `popup-vigia reset`.
+        if rc is not None and "refusing" in msg.lower():
+            journal({"id": aid, "quando": stamp(), "fase": "resultado", "resultado": "clique-nao-enviado",
+                     "motivo": msg[:300]})
+            rodada_log("window %s: click not sent (refused): %s" % (wid, msg[:200]))
+        else:
+            journal({"id": aid, "quando": stamp(), "fase": "clique-incerto", "rc": rc, "motivo": msg[:300]})
+            rodada_log("window %s: click UNCERTAIN (it may have arrived), not repeating: rc=%s %s" % (wid, rc, msg[:200]))
+            avisa("sem-resultado", "popup-vigia: tried to click a permission window, got an error and do not know if the click arrived. "
+                                   "Look at the Mac screen and run: popup-vigia reset")
+        return
+    journal({"id": aid, "quando": stamp(), "fase": "enviado"})
+    # 4) result: did the window close? (from the window list, not from text)
+    time.sleep(1.5)
+    fechou = all(j["id"] != w["id"] for j in janelas())
+    depois = "%s/%s-depois.jpg" % (IMG, aid)
+    meta2, _ = foto(depois, idx)
+    journal({"id": aid, "quando": stamp(), "fase": "resultado",
+             "resultado": "janela-fechou" if fechou else "janela-continua",
+             "depois": depois if meta2 else None,
+             "quem_pediu_permissao_ultimos_2min": atribuicao(),
+             "nota": "the 'quem_pediu' list is a hint (correlation), not proof of which request this window was"})
+    rodada_log("window %s: clicked '%s' at (%d,%d); %s; text: %s"
+               % (wid, botao, round(fbx), round(fby), "closed" if fechou else "STILL THERE", " / ".join(texto.split("\n"))[:200]))
+
+
+# ---------- round ----------
+def mata_cao(cao):
+    if cao:
+        try:
+            os.killpg(cao.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
+def rodada():
+    use_local_mr_config()
+    os.makedirs(ST, mode=0o700, exist_ok=True)
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    lock = open(ST + "/lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return
+    signal.alarm(PRAZO_RODADA)
+    # An unlock lock caused by a CONNECTION DROP (not a wrong password) expires by itself after TRAVA_VENCE s,
+    # at most TRAVA_MAX_DIA times a day. A refused password ("login refused") stays locked until reset.
+    # Reason: a VNC drop (IncompleteReadError) once left the watcher stopped for about an hour.
+    uf = ST + "/UNLOCK-FAILED"
+    if os.path.exists(uf):
+        try:
+            msg = open(uf).read()
+            idade = time.time() - os.path.getmtime(uf)
+        except OSError:
+            msg, idade = "", 0
+        hoje = time.strftime("%Y-%m-%d")
+        venc = load_json(ST + "/vencidas.json", {})
+        if ("connect/login failed" in msg and "refused" not in msg and idade >= TRAVA_VENCE
+                and venc.get(hoje, 0) < TRAVA_MAX_DIA):
+            venc = {hoje: venc.get(hoje, 0) + 1}
+            with open(ST + "/vencidas.json", "w") as f:
+                json.dump(venc, f)
+            os.remove(uf)
+            rodada_log("UNLOCK-FAILED lock expired (connection drop, %d min); trying again (%d/%d today)"
+                       % (idade // 60, venc[hoje], TRAVA_MAX_DIA))
+    for trava in ("UNLOCK-FAILED", "RELOCK-FAILED"):
+        if os.path.exists("%s/%s" % (ST, trava)):
+            avisa("trava", "popup-vigia is stopped (%s). On the Mac, run: popup-vigia reset" % trava, cada=6 * 3600)
+            return
+    if not os.access(MR, os.X_OK):
+        avisa("mr", "popup-vigia: the mac-remote executable is missing (%s)." % MR, cada=6 * 3600)
+        return
+    bloqueada = tela_bloqueada()
+    alvo = janelas_de_permissao(janelas())
+    presos = load_json(C_STATE, {}).get("sandboxd") or 0   # only sandboxd requests (the ones that freeze the Mac).
+    # Requests "from your own programs" are no trigger: mac-remote itself raises some at every unlock.
+    if not alvo and not (bloqueada and presos >= 1):
+        if presos >= 1 and not bloqueada:
+            rodada_log("%d stuck request(s) and no known permission window on screen" % presos)
+            avisa("sem-janela", "popup-vigia: %d permission request(s) unanswered and I do not see the window. Look at the Mac." % presos)
+        return
+    if humano_ativo():
+        return                                       # a person is at the Mac: they answer it themselves
+    manutencao()
+    sem_repetir = {l["janela"] for l in sem_resultado(ler_journal())}
+    tentativas = load_json(ST + "/tentativas.json", {})
+    desbloqueei, tentei, cao = False, False, None
+    try:
+        if bloqueada:
+            if holder_ativo():
+                rodada_log("screen locked and mac-remote is in use elsewhere; not entering")
+                return
+            # watchdog: locks the screen anyway in CAO s, even if I die
+            cao = subprocess.Popen(["/bin/sh", "-c", 'sleep %d; "%s" lock --force' % (CAO, MR)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+            tentei = True
+            rc, out, err = run([MR, "unlock", "--idle-timeout", str(LEASE)], PRAZO_UNLOCK)
+            if rc != 0 or tela_bloqueada():
+                open(ST + "/UNLOCK-FAILED", "w").write("%s %s\n" % (stamp(), (err.strip() or out.strip())[:300]))
+                rodada_log("could NOT unlock: %s" % (err.strip() or out.strip())[:200])
+                avisa("unlock", "popup-vigia: could not unlock the screen (%d stuck requests). Stopped trying. "
+                                "Look at the Mac and run: popup-vigia reset" % presos, cada=0)
+                return
+            desbloqueei = True
+            time.sleep(2.0)
+            alvo = janelas_de_permissao(janelas())
+            if not alvo:
+                rodada_log("unlocked (%d stuck) and there is no known permission window" % presos)
+                avisa("sem-janela", "popup-vigia: %d permission request(s) unanswered and I do not see the window. Look at the Mac." % presos)
+        vistas = set()
+        while alvo and len(vistas) < MAX_JANELAS:
+            vistas.add(alvo[0]["id"])
+            trata_janela(alvo[0], tentativas, sem_repetir)
+            time.sleep(1.0)
+            alvo = [w for w in janelas_de_permissao(janelas()) if w["id"] not in vistas]
+    finally:
+        tmp = ST + "/tentativas.json.tmp"
+        vivas = {str(w["id"]) for w in janelas()}
+        with open(tmp, "w") as f:
+            json.dump({k: v for k, v in tentativas.items() if k in vivas}, f)
+        os.replace(tmp, ST + "/tentativas.json")
+        if desbloqueei:
+            run([MR, "lock"], 30)
+            for _ in range(10):
+                if tela_bloqueada():
+                    break
+                time.sleep(1)
+            if tela_bloqueada():
+                mata_cao(cao)
+            else:
+                open(ST + "/RELOCK-FAILED", "w").write(stamp() + "\n")
+                rodada_log("could NOT lock the screen again (the watchdog tries within %d s)" % CAO)
+                avisa("relock", "popup-vigia: unlocked the screen and could NOT lock it again. Look at the Mac.", cada=0)
+        elif tentei:
+            # The unlock failed or timed out. The mac-remote session (holder) may finish unlocking LATER.
+            # So: send lock (that also ends the holder) and remove the watchdog only with both proofs:
+            # holder stopped AND screen locked. Without both, the watchdog stays and locks within CAO s.
+            run([MR, "lock"], 30)
+            if holder_parado_com_certeza() and tela_bloqueada():
+                mata_cao(cao)
+            else:
+                rodada_log("unlock failed and I could not confirm holder stopped + screen locked; "
+                           "the watchdog stays (locks within %d s)" % CAO)
+        else:
+            mata_cao(cao)
+
+
+def cmd_log(n):
+    linhas = ler_journal()
+    fim = {l["id"]: l for l in linhas if l.get("fase") == "resultado"}
+    acoes = [l for l in linhas if l.get("fase") in ("intencao", "nao-suportada")][-n:]
+    if not acoes:
+        print("no clicks recorded")
+    for a in acoes:
+        r = fim.get(a["id"], {})
+        res = "did not click (unknown window)" if a["fase"] == "nao-suportada" else r.get("resultado", "NO RESULT (unknown)")
+        print("%s  botao=%s  %s" % (a["quando"], a.get("botao", "-"), res))
+        print("   text: %s" % " / ".join(a.get("texto", "").split("\n"))[:240])
+        print("   photos: %s | %s" % (a.get("antes"), r.get("depois")))
+
+
+def cmd_status():
+    for trava in ("UNLOCK-FAILED", "RELOCK-FAILED"):
+        p = "%s/%s" % (ST, trava)
+        print("%s: %s" % (trava, open(p).read().strip() if os.path.exists(p) else "no"))
+    linhas = ler_journal()
+    print("clicks recorded: %d; without result: %d" % (
+        len([l for l in linhas if l.get("fase") == "intencao"]), len(sem_resultado(linhas))))
+    print("journal: %s" % JOURNAL)
+
+
+def cmd_sync_config():
+    """Copy the mac-remote config (and the template it mentions) to a local folder. Run it while you are
+    at the Mac, from a terminal that can read the synced folder. The files hold only secret references."""
+    origem = os.path.realpath(os.environ.get("MAC_REMOTE_CONFIG_DIR") or HOME + "/.config/mac-remote")
+    destino = os.path.dirname(MR_CONF_LOCAL)
+    os.makedirs(destino, mode=0o700, exist_ok=True)
+    n = 0
+    for f in os.listdir(origem):
+        src = os.path.join(origem, f)
+        if os.path.isfile(src):
+            txt = open(src).read().replace(HOME + "/.config/mac-remote/", destino + "/").replace("~/.config/mac-remote/", destino + "/")
+            fd = os.open(os.path.join(destino, f), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.write(fd, txt.encode())
+            os.close(fd)
+            n += 1
+    print("copied %d files to %s" % (n, destino))
+
+
+def cmd_reset():
+    for f in ("UNLOCK-FAILED", "RELOCK-FAILED", "tentativas.json"):
+        try:
+            os.remove("%s/%s" % (ST, f))
+            print("removed:", f)
+        except OSError:
+            pass
+    for l in sem_resultado(ler_journal()):
+        journal({"id": l["id"], "quando": stamp(), "fase": "resultado", "resultado": "desconhecido",
+                 "motivo": "closed by hand with reset"})
+    print("ok")
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a[:1] == ["log"]:
+        cmd_log(int(a[1]) if len(a) > 1 else 10)
+    elif a[:1] == ["status"]:
+        cmd_status()
+    elif a[:1] == ["reset"]:
+        cmd_reset()
+    elif a[:1] == ["sync-config"]:
+        cmd_sync_config()
+    elif not a:
+        rodada()
+    else:
+        sys.exit("usage: popup-vigia [log N | status | reset | sync-config]")
