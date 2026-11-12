@@ -265,12 +265,43 @@ class Input(unittest.TestCase):
         s = FakeSession()
         buf = io.StringIO()
         with mock.patch.object(mr.asyncio, 'sleep', new=mock.AsyncMock()), \
+                mock.patch.object(mr, 'is_locked', return_value=True), \
                 contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             asyncio.run(mr.type_password(s, 'ab'))
         downs = keydowns(s.c.writer.data)
         self.assertEqual(downs[0], kc['Shift_L'])              # wake
         self.assertEqual(downs[-3:], [kc['a'], kc['b'], kc['Return']])
         self.assertEqual(buf.getvalue(), '')
+
+    # someone unlocks the Mac (Touch ID) while the holder is about to type: the password must not
+    # land in whatever app is now in front, and must never be submitted with Return
+    def type_with_lock(self, locked_fn, pw='abc'):
+        s = FakeSession()
+        with mock.patch.object(mr.asyncio, 'sleep', new=mock.AsyncMock()), \
+                mock.patch.object(mr, 'is_locked', side_effect=lambda: locked_fn(s)):
+            with self.assertRaises(mr.Fail) as e:
+                asyncio.run(mr.type_password(s, pw))
+        return keydowns(s.c.writer.data), str(e.exception)
+
+    def test_type_password_refuses_when_screen_already_unlocked(self):
+        downs, err = self.type_with_lock(lambda s: False)
+        self.assertEqual(downs, [])                             # no wake, no BackSpace, no password
+        self.assertIn('no longer locked', err)
+
+    def test_type_password_stops_when_unlocked_mid_typing(self):
+        kc = sys.modules['asyncvnc'].key_codes
+        downs, err = self.type_with_lock(lambda s: kc['a'] not in keydowns(s.c.writer.data))
+        self.assertNotIn(kc['b'], downs)
+        self.assertNotIn(kc['c'], downs)
+        self.assertNotIn(kc['Return'], downs)
+        self.assertIn('no longer locked', err)
+
+    def test_type_password_no_return_when_unlocked_before_submit(self):
+        kc = sys.modules['asyncvnc'].key_codes
+        downs, err = self.type_with_lock(lambda s: kc['c'] not in keydowns(s.c.writer.data))
+        self.assertEqual(downs[-3:], [kc['a'], kc['b'], kc['c']])
+        self.assertNotIn(kc['Return'], downs)
+        self.assertIn('no longer locked', err)
 
 
 class Coordinates(unittest.TestCase):
