@@ -1,6 +1,6 @@
 ---
 name: mac-remote
-description: 'See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and an item on it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").'
+description: 'See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").'
 argument-hint: "[status|unlock|shot|click|move|type|keys|lock|restart]"
 version: "0.4.2"
 metadata:
