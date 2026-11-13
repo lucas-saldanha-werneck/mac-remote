@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/mac-remote)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.4.2-blue)](CHANGELOG.md)
 [![mac-remote score](https://img.shields.io/badge/skill%20score-96.5%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
+[![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-95.0%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
 A Claude Code plugin that lets Claude see and control your Mac through macOS's own Screen Sharing (VNC), even when the screen is locked. It is meant for when you are away from the Mac (for example on your phone with Remote Control) and a task is stuck on a popup, a dialog or an app that needs a click.
 
