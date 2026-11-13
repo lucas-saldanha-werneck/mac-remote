@@ -1,12 +1,18 @@
 ---
 name: mac-remote
-description: See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and something on it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").
+description: 'See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and an item on it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").'
 argument-hint: "[status|unlock|shot|click|move|type|keys|lock|restart]"
+version: "0.4.2"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
+  tags: [remote, macos, vnc]
 ---
 
 # mac-remote: the Mac's screen from a distance (local VNC)
+
+## Purpose
+
+Let Claude see and control the Mac's screen from a distance, even when it is locked, for the cases where only a click on screen solves the problem.
 
 Everything goes through the `mac-remote` command (it is on the Bash tool's PATH while the plugin is enabled; full path: `${CLAUDE_PLUGIN_ROOT}/bin/mac-remote`). `mac-remote --help` lists every option.
 
@@ -54,6 +60,23 @@ macOS locks the screen again about 1 s after the VNC session that unlocked it di
 - Keys only land reliably while the client is reading the framebuffer. The holder reads all the time; a one-off connection reads a full frame and taps Shift before acting.
 - Lock state: `CGSSessionScreenIsLocked`. Local input: `HIDIdleTime` from `ioreg -c IOHIDSystem`.
 - Files (default `~/.local/share/mac-remote/`, or `$MAC_REMOTE_HOME`): `holder.log` (events and exit reason), `holder.json`, `holder.sock`, `last-shot.json`, `state.json`, `shots/`.
+
+## Prerequisites
+
+- macOS with Screen Sharing turned on, and python3; the command exits with an error on other systems.
+- Python packages installed by the setup command (asyncvnc, pillow, pyobjc-framework-Quartz).
+- The Mac password in a configured secret source, so unlock can work.
+
+## Limitations
+
+- macOS only. Input commands refuse when someone used the Mac in the last 20 seconds, unless the user said yes to force.
+- The holder exits and the screen locks after the idle timeout, when the VNC connection drops or when the screen is locked another way.
+- A password with characters that need dead keys on the keyboard layout is refused by unlock.
+
+## Troubleshooting
+
+- Error "still locked" from unlock: it tries twice and stops. Run shot and look at the screen; never retry in a loop.
+- Error IncompleteReadError on the first connection after a long idle: normal; the command retries up to 4 times.
 
 ## Examples
 
