@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## 0.4.2 (2026-11-13)
+
+- Skill schema and score: version and tags, Purpose, Prerequisites, Limitations and Troubleshooting, no vague words in the description; add skill score badge.
+
 ## [0.4.1] - 2026-11-13
 - Author metadata, Instructions and Examples in `SKILL.md`.
 

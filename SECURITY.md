@@ -8,7 +8,7 @@ security problem.
 
 ## Supported versions
 
-Only the latest release (0.4.1) is supported. Fixes go into a new release.
+Only the latest release (0.4.2) is supported. Fixes go into a new release.
 
 ## What mac-remote accesses
 
