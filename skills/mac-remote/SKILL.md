@@ -2,6 +2,8 @@
 name: mac-remote
 description: See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and something on it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").
 argument-hint: "[status|unlock|shot|click|move|type|keys|lock|restart]"
+metadata:
+  author: Lucas Saldanha Werneck <lucas@2olhares.com>
 ---
 
 # mac-remote: the Mac's screen from a distance (local VNC)
@@ -9,6 +11,13 @@ argument-hint: "[status|unlock|shot|click|move|type|keys|lock|restart]"
 Everything goes through the `mac-remote` command (it is on the Bash tool's PATH while the plugin is enabled; full path: `${CLAUDE_PLUGIN_ROOT}/bin/mac-remote`). `mac-remote --help` lists every option.
 
 If a command says a Python module is missing, run `mac-remote setup` once. If it says there is no password source, tell the user to configure `MAC_REMOTE_PASS_CMD` (see the plugin README). Do not try to find or read the password yourself.
+
+## Instructions
+
+1. `mac-remote status` to see whether the screen is locked and whether a holder is running.
+2. `mac-remote unlock` if locked, then `mac-remote shot` and open the image with Read.
+3. Act with `click`, `move`, `type` or `keys` (prefer `--app NAME`), then `shot` again to check.
+4. Always finish with `mac-remote lock`. Never type or read the Mac password yourself.
 
 ## The fact that drives the design
 
@@ -45,3 +54,9 @@ macOS locks the screen again about 1 s after the VNC session that unlocked it di
 - Keys only land reliably while the client is reading the framebuffer. The holder reads all the time; a one-off connection reads a full frame and taps Shift before acting.
 - Lock state: `CGSSessionScreenIsLocked`. Local input: `HIDIdleTime` from `ioreg -c IOHIDSystem`.
 - Files (default `~/.local/share/mac-remote/`, or `$MAC_REMOTE_HOME`): `holder.log` (events and exit reason), `holder.json`, `holder.sock`, `last-shot.json`, `state.json`, `shots/`.
+
+## Examples
+
+- User: "the screen is locked, close the popup on the Mac". Claude runs `mac-remote unlock`, takes a `shot`, clicks the popup's button, checks with another `shot`, then runs `mac-remote lock`.
+- User: "what is on the screen?". Claude runs `mac-remote shot` and describes the image it opens.
+- User: "restart the Mac". Claude runs `mac-remote restart --dry-run`, warns that unsaved work can be lost, and runs `mac-remote restart --yes` only after the user confirms.
