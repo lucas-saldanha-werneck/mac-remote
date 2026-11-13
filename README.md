@@ -1,6 +1,20 @@
 # mac-remote
 
+[![CI](https://github.com/lucas-saldanha-werneck/mac-remote/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/mac-remote/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/lucas-saldanha-werneck/mac-remote)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue)](CHANGELOG.md)
+
 A Claude Code plugin that lets Claude see and control your Mac through macOS's own Screen Sharing (VNC), even when the screen is locked. It is meant for when you are away from the Mac (for example on your phone with Remote Control) and a task is stuck on a popup, a dialog or an app that needs a click.
+
+[![mac-remote demo: tap to open the video](https://github.com/user-attachments/assets/0dac3827-e93f-48ca-8cbc-c5e8aebf2a39)](https://lucas-saldanha-werneck.github.io/mac-remote/demo.mp4)
+
+<table>
+<tr>
+<td align="center"><img src="https://github.com/user-attachments/assets/5260f7a7-8bd8-4a3b-8b26-b2c27cca9360" alt="Claude reading a macOS permission popup from a screenshot" width="320"><br>Claude sees the popup</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/78d3784f-0df8-4815-ae5a-000a9a1f502a" alt="The screen after Allow was clicked" width="320"><br>The popup is gone</td>
+<td align="center"><img src="https://github.com/user-attachments/assets/04b3d0e8-ce31-4c62-8035-f7282dce3da9" alt="The Mac locked again when the work is done" width="320"><br>Locked again when done</td>
+</tr>
+</table>
 
 Claude can unlock the screen with your Mac password, take screenshots, click, type and press keys, then lock the screen again. It can also restart the Mac without it stopping at the FileVault disk password screen (`mac-remote restart`).
 
@@ -217,6 +231,10 @@ Then delete `~/.local/share/mac-remote` (virtualenv, screenshots, log) and `~/.c
 - Clipboard save and restore was tested live with text only (the text came back after a paste); images and files were tested with fakes and a private pasteboard. Data that an app only provides on request (some promised files) may not come back.
 - `restart` calls `/usr/bin/sudo`, `/usr/bin/fdesetup`, `/usr/sbin/sysadminctl` and `/sbin/shutdown` by absolute path, never through `PATH`. It was tested only with fakes in their place; the tests never restart anything. It was not run on a real Mac in this release. The steps follow the `fdesetup` manual page (`authrestart -inputplist` with `Username` and `Password` keys) and a script the author used on his own Mac.
 - Not tested in the Claude desktop app or on claude.ai. Per the Claude Code docs, claude.ai and Cowork do not install plugins that have a top-level `bin/` folder.
+
+## Security
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 
