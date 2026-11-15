@@ -226,11 +226,11 @@ EOF2
 chmod +x ~/.local/bin/carga-vigia
 mkdir -p ~/Library/Logs/carga-vigia ~/.config/carga-vigia
 # optional: printf 'LANG=pt\nNOTIFY_CMD=/path/to/notifier\n' > ~/.config/carga-vigia/config  (default: the Mac's language, log only)
-cat > ~/Library/LaunchAgents/com.lucas.carga-vigia.plist <<EOF2
+cat > ~/Library/LaunchAgents/local.mac-remote.carga-vigia.plist <<EOF2
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>com.lucas.carga-vigia</string>
+<key>Label</key><string>local.mac-remote.carga-vigia</string>
 <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>$HOME/.local/bin/carga-vigia</string></array>
 <key>StartInterval</key><integer>60</integer>
 <key>ProcessType</key><string>Background</string>
@@ -239,8 +239,8 @@ cat > ~/Library/LaunchAgents/com.lucas.carga-vigia.plist <<EOF2
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/carga-vigia/launchd.out</string>
 </dict></plist>
 EOF2
-plutil -lint ~/Library/LaunchAgents/com.lucas.carga-vigia.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.lucas.carga-vigia.plist
+plutil -lint ~/Library/LaunchAgents/local.mac-remote.carga-vigia.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.mac-remote.carga-vigia.plist
 carga-vigia status        # `carga-vigia log 5` shows the last measurements
 ```
 
