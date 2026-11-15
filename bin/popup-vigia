@@ -236,21 +236,47 @@ NADA = {"en": "a permission window", "pt": "uma janela de permissão"}
 APP_ANON = {"en": "an app", "pt": "um app"}
 QUERO = {"en": "wants to", "pt": "quer"}
 PEDE = {"en": "asks:", "pt": "pede:"}
-# Known requests, English dialog text -> Portuguese. Anything else is shown in English as the dialog says it.
-ACOES_PT = [
-    (r"access files in your (\w+) folder", lambda m: "acessar a pasta " + m.group(1)),
-    (r"access (?:data|files) from other apps", lambda m: "acessar dados de outros apps"),
-    (r"find devices on local networks?", lambda m: "encontrar dispositivos na rede local"),
-    (r"control this computer|use accessibility", lambda m: "controlar este computador"),
-    (r"record (?:the |this computer'?s )?screen", lambda m: "gravar a tela"),
-    (r"access the microphone", lambda m: "usar o microfone"),
-    (r"access the camera", lambda m: "usar a câmera"),
-    (r"send you notifications", lambda m: "enviar notificações"),
-    (r"access your (contacts|calendar|photos|reminders)",
-     lambda m: "acessar " + {"contacts": "seus contatos", "calendar": "seu calendário",
-                             "photos": "suas fotos", "reminders": "seus lembretes"}[m.group(1).lower()]),
-]
 ASPAS = "“”\"‘’'«»"
+# Known requests: dialog text -> (English, Portuguese). A known request is shown in these words even when
+# OCR left junk after it; anything else is shown as the dialog says it (English).
+_CONTATOS = {"contacts": ("your contacts", "seus contatos"), "calendar": ("your calendar", "seu calendário"),
+             "photos": ("your photos", "suas fotos"), "reminders": ("your reminders", "seus lembretes")}
+ACOES = [
+    (r"access files in your (\w+)(?: folder)?",
+     lambda m: ("access files in your %s folder" % m.group(1), "acessar a pasta " + m.group(1))),
+    (r"access files managed by [%s]?([^%s]{1,40}?)[%s]?(?=[.?!]|$)" % (ASPAS, ASPAS, ASPAS),
+     lambda m: ("access files in " + m.group(1).strip(), "acessar arquivos do " + m.group(1).strip())),
+    (r"access (?:data|files) from other apps",
+     lambda m: ("access data from other apps", "acessar dados de outros apps")),
+    (r"access your music|media library",
+     lambda m: ("access your music and videos", "acessar suas músicas e vídeos")),
+    (r"find devices on local networks?",
+     lambda m: ("find devices on your local network", "encontrar dispositivos na rede local")),
+    (r"control this computer|use accessibility",
+     lambda m: ("control this computer", "controlar este computador")),
+    (r"record (?:the |this computer'?s )?screen", lambda m: ("record the screen", "gravar a tela")),
+    (r"access the microphone", lambda m: ("use the microphone", "usar o microfone")),
+    (r"access the camera", lambda m: ("use the camera", "usar a câmera")),
+    (r"send you notifications", lambda m: ("send you notifications", "enviar notificações")),
+    (r"access your (contacts|calendar|photos|reminders)",
+     lambda m: tuple("access " + e if i == 0 else "acessar " + e
+                     for i, e in enumerate(_CONTATOS[m.group(1).lower()]))),
+]
+# Words a wrapped request line can start with. OCR glues text from the window behind the translucent
+# dialog to the start of the line ("| off . Mar files managed by ..."); words before the first of these go.
+_INICIO = set("""access find control record use send receive read monitor your you files file data folder
+folders media managed by devices device on local network networks in from other apps app and or the this
+that a an to of for with its library music video videos activity contacts calendar calendars photos
+reminders microphone camera screen computer notifications documents desktop downloads keystrokes input
+location bluetooth system events administer""".split())
+_SUJO = re.compile(r"[|{}\[\]<>~=@#$%^*\\_]")
+
+
+def _sem_lixo_no_inicio(linha):
+    """The wrapped line from its first plausible request word on, or '' when it has none."""
+    pal = linha.split()
+    k = next((k for k, p in enumerate(pal) if p.lower().strip(".,?!" + ASPAS) in _INICIO), None)
+    return " ".join(pal[k:]) if k is not None else ""
 _RE_BOTOES = re.compile(r"\b(don.?t|deny)\b.*\ballow\b|\ballow\b.*\b(don.?t|deny)\b", re.I)
 _RE_FRASE = re.compile(r"would like to|wants? to|\ballow\s+[%s].+[%s]\s+to\b" % (ASPAS, ASPAS), re.I)
 _RE_PEDIDO = [
@@ -274,14 +300,20 @@ def pedido(texto):
     if i is None:
         return None, None
     frase = linhas[i]
-    if not re.search(r"[.?!]$", frase) and i + 1 < fim:      # the sentence wrapped onto the next line
-        frase += " " + linhas[i + 1]
+    j = i + 1
+    while not re.search(r"[.?!]$", frase) and j < fim and j <= i + 3:   # the sentence wrapped
+        resto = _sem_lixo_no_inicio(linhas[j])
+        if not resto:
+            break
+        frase += " " + resto
+        j += 1
     for rx in _RE_PEDIDO:
         m = rx.search(frase)
         if m:
             app = (m.groupdict().get("app") or "").strip()
             app = re.sub(r"\.app$", "", app, flags=re.I).strip() or None
-            return app, m.group("acao").strip()[:100]
+            acao = re.split(r"(?<=[.?!])\s", m.group("acao").strip())[0].rstrip(".?! ")  # junk after the sentence
+            return app, acao[:100]
     return None, None
 
 
@@ -291,13 +323,13 @@ def o_que(texto, lang):
     if not acao:
         return NADA[lang]
     quem = '"%s"' % app if app else APP_ANON[lang]
-    if lang == "pt":
-        for rx, f in ACOES_PT:
-            m = re.search(rx, acao, re.I)
-            if m:
-                return "%s %s %s" % (quem, QUERO[lang], f(m))
-        return "%s %s %s" % (quem, PEDE[lang], acao)
-    return "%s %s %s" % (quem, QUERO[lang], acao)
+    for rx, f in ACOES:
+        m = re.search(rx, acao, re.I)
+        if m:
+            return "%s %s %s" % (quem, QUERO[lang], f(m)[lang == "pt"])
+    if _SUJO.search(acao) or not re.match(r"[a-z]", acao, re.I):
+        return NADA[lang]                                     # unknown request with OCR junk in it
+    return "%s %s %s" % (quem, PEDE[lang] if lang == "pt" else QUERO[lang], acao)
 
 
 def monta(chave, texto=None, lang=None, **kw):

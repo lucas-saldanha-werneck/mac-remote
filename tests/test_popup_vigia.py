@@ -247,6 +247,68 @@ class Notices(unittest.TestCase):
             os.remove(pv.CONF)
 
 
+class RealOcrNotices(unittest.TestCase):
+    # Every distinct OCR text of a request popup in the real click journal (cliques.jsonl, 15/11): the request
+    # sentence wraps and OCR glues words from the window behind the translucent dialog to each line.
+    REAL = [
+        "ideas ar ra re ct ny a gr ier mc mye i iene me new \u2014 Sno ohh\nPark an idea\nNo ideas parked.\nAssumptions z\n\u201cgato\u201d wants to access files\nmanaged by \u201cDropbox\u201d.\nDon't Allow Allow",
+        "ideas ar ra re ct ny a gr ier mc mye i iene me new \u2014 Sno ohh\nPark an idea\nNo ideas parked.\nAssumptions z\n\u201cgato2\u201d wants to access files\nmanaged by \u201cDropbox\u201d.\nDon't Allow Allow",
+        'ideas ce mr ct fh el Dr "te em me aA me = pe wo ~ Se nm hy\nPark an idea\nNo ideas parked.\nAssumptions\ncea .\n\u201cpython3.14\u201d wants to access\nfiles managed by \u201cDropbox\u201d.\nDon\'t Allow Allow',
+        'ideas ar ra re ct ny a gr ier mc mye i iene me new \u2014 Sno ohh\nPark an idea\nNo ideas parked.\nAssumptions z\n\u201cgato4" wants to access files\nmanaged by \u201cDropbox\u201d.\nDon\'t Allow Allow',
+        "; = & inis compu\nsem confirmagao.\nm timeout . Nao mexi neles. (4 Projects - ~\nssao Al-Tools ( local_571f@d05 ) [) Remote Co\nirmagao che\next >\nse resumo.\nrectors >\nAllow \u201cGrok Bot.app\u201d to access\nyour music, video activity, and Hie\nroungd task:\npuna shall\u2019c media library in Apple Music? g\nStart relay |\nDon't Allow Allow as\n12 finished\n[Saude - enmg 09-11 >\ncklist 3 times >",
+        "& inis compu\n[Saude - enmg 09-11 > (5 Projects - ~\ncklist 3 times > {J Remote Cor\ntava parad i ext >\n) plano.\nando o ouvi rectors >\nAllow \u201cGrok Bot.app\u201d to access\nyour music, video activity, and\nmedia library in Apple Music? ground task\nAck RC-off\nound shell c Don't Allow Allow\n13 finished\nyython3",
+        "& This compu\n{5 Projects - ~\ndou fazer isso. ({) Remote Cor\nd39ce4), 8\next >\n|, 86 h para ( Zs\n31691), 85\niectors >\n. Allow \u201cGrok Bot.app\u201d to access\n| off . Mar your music, video activity, and\nnA segundo| media library in Apple Music? ground task\nRestart rel\nDon't Allow Allow \u2014 :\n14 finished\nround >\njundo plano.\namin ( TRIC \\} Alankhiim nadiann navn",
+        "& This compu\n{5 Projects - ~\ndou fazer isso. ({) Remote Cor\nd39ce4), 8\nt>\n|, 86 h para ( ie\n31691), 85\niectors >\n. Allow \u201cGrok Bot.app\u201d to access\n| off . Mar your music, video activity, and\nnA segundo| media library in Apple Music? ground task\nRestart rel\nDon't Allow Allow \u2014 :\n14 finished\nround >\njundo plano.\namin ( TRIC \\} Alankhiim nadiann navn",
+        '& This compu\n{5 Projects - ~\ndou fazer isso. (J Remote Co:\nd39ce4), 8 ?\nt >\n|, 86 h para r=" iia\n31691), 85\niectors >\n. \u201cGrok Bot.app\u201d would like to\noff .Mar access files in your Desktop\nnsegundo| folder. ground task:\nDon\'t Allow Allow Restart rela\n14 finished\nround >\njundo plano.\namin ( TRIC \\} Alankhiim nadiann navn',
+        "& inis compu\n{5 Projects - ~\ndou fazer isso. ({) Remote Cor\nd39ce4), 8 ?\next >\n|, 86 h para CQ\n31691), 85\nrectors >\n\u201cGrok Bot.app\u201d wants to access\n| off . Mar files managed by \u201ciCloud Drive\u201d.\na segundo ground task:\nDon't Allow Allow Restart rela\n14 finished\nround >\njundo plano.",
+        "& This compu\n{5 Projects - ~\ndou fazer isso. (J Remote Co:\nd39ce4), 8 ?\nt >\n|, 86 h para = Re\n31691), 85\niectors >\n. \u201cGrok Bot.app\u201d would like to\noff Mar access files in your Documents\nnsegundo| folder. ground task:\nDon't Allow Allow Restart rela\n14 finished\nround >\njundo plano.\namin ( TRIC \\} Alankhiim nadiann navn",
+        "& This compu\n{5 Projects - ~\ndou fazer isso. (J Remote Co:\nd39ce4),8 ?\nt >\n|, 86 h para ron Re\n31691), 85\niectors >\n. \u201cGrok Bot.app\u201d would like to\n| off .Mar access files in your Downloads\nnsegundo| folder. ground task:\nDon't Allow Allow Restart rela\n14 finished\nround >\njundo plano.\namin ( TRIC \\} Alankhiim nadiann navn",
+    ]
+    PT = [
+        '"gato" quer acessar arquivos do Dropbox',
+        '"gato2" quer acessar arquivos do Dropbox',
+        '"python3.14" quer acessar arquivos do Dropbox',
+        '"gato4" quer acessar arquivos do Dropbox',
+        '"Grok Bot" quer acessar suas m\u00fasicas e v\u00eddeos',
+        '"Grok Bot" quer acessar suas m\u00fasicas e v\u00eddeos',
+        '"Grok Bot" quer acessar suas m\u00fasicas e v\u00eddeos',
+        '"Grok Bot" quer acessar suas m\u00fasicas e v\u00eddeos',
+        '"Grok Bot" quer acessar a pasta Desktop',
+        '"Grok Bot" quer acessar arquivos do iCloud Drive',
+        '"Grok Bot" quer acessar a pasta Documents',
+        '"Grok Bot" quer acessar a pasta Downloads',
+    ]
+    EN = [
+        '"gato" wants to access files in Dropbox',
+        '"gato2" wants to access files in Dropbox',
+        '"python3.14" wants to access files in Dropbox',
+        '"gato4" wants to access files in Dropbox',
+        '"Grok Bot" wants to access your music and videos',
+        '"Grok Bot" wants to access your music and videos',
+        '"Grok Bot" wants to access your music and videos',
+        '"Grok Bot" wants to access your music and videos',
+        '"Grok Bot" wants to access files in your Desktop folder',
+        '"Grok Bot" wants to access files in iCloud Drive',
+        '"Grok Bot" wants to access files in your Documents folder',
+        '"Grok Bot" wants to access files in your Downloads folder',
+    ]
+
+    def test_real_texts_give_clean_notices(self):
+        self.assertEqual(len(self.REAL), len(self.PT))
+        for texto, pt, en in zip(self.REAL, self.PT, self.EN):
+            self.assertEqual(pv.monta('nao-suportada', texto, lang='pt').split('\n')[0], 'Popup no Mac: %s.' % pt)
+            self.assertEqual(pv.monta('nao-suportada', texto, lang='en').split('\n')[0], 'Popup on the Mac: %s.' % en)
+
+    def test_junk_at_the_start_of_a_wrapped_line_is_dropped(self):
+        t = '\u201cFoo\u201d would like to fly\n| off . Mar the moon. ground task\nDon\'t Allow Allow'
+        self.assertIn('"Foo" pede: fly the moon.', pv.monta('nao-suportada', t, lang='pt'))
+        self.assertIn('"Foo" wants to fly the moon.', pv.monta('nao-suportada', t, lang='en'))
+
+    def test_unknown_request_with_junk_gives_generic_phrase(self):
+        t = '\u201cFoo\u201d would like to fly | {x} moon.\nDon\'t Allow Allow'
+        self.assertTrue(pv.monta('nao-suportada', t, lang='pt').startswith('Popup no Mac: uma janela de permiss\u00e3o.'))
+
+
 class Wiring(unittest.TestCase):
     def test_mac_remote_is_the_sibling_command(self):
         self.assertEqual(pv.MR, os.path.join(ROOT, 'bin', 'mac-remote'))
