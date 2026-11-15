@@ -246,17 +246,47 @@ def creds():
 
 
 # ---------- VNC ----------
+class JoinAuthChoice:
+    """Writer wrapper for asyncvnc.Client.create (1.3.0) that sends the Apple login choice
+    (the lone byte 33) in the same write as the next packet, the RSA key request.
+    asyncvnc writes them separately; when screensharingd's read lands between the two it sees
+    only the 1 byte, stays waiting for an auth type, reads the request's leading 0 as "auth type
+    0 which was not advertised" and drops the connection (IncompleteReadError here). Every good
+    login in the screensharingd log read the 15 bytes together; every drop read 1 byte alone.
+    Only the auth-choice write (the one right after the version string) is looked at, and only
+    a 33 there is held; other auth types (1, 2) and every later write pass through unchanged."""
+
+    def __init__(self, writer):
+        self._w = writer
+        self._n = 0
+        self._held = None
+
+    def write(self, data):
+        self._n += 1
+        if self._held is not None:
+            data, self._held = self._held + bytes(data), None
+        elif self._n == 2 and bytes(data) == b'\x21':
+            self._held = b'\x21'
+            return
+        if self._n >= 2:
+            self.write = self._w.write          # done: later writes go straight through
+        self._w.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._w, name)
+
+
 async def connect(cred=None):
     import asyncvnc
     u, p = cred or creds()
     last = None
-    # The server sometimes drops a login (IncompleteReadError after it sat idle);
-    # retry a few times, but never on PermissionError (wrong password -> avoid account lockout).
+    # JoinAuthChoice avoids the known drop; still retry other drops a few times,
+    # but never on PermissionError (wrong password -> avoid account lockout).
     for attempt in range(4):
         w = None
         try:
             r, w = await asyncio.wait_for(asyncio.open_connection(HOST, PORT, limit=2**22), 5)
-            return await asyncio.wait_for(asyncvnc.Client.create(r, w, u, p, None), 12)
+            return await asyncio.wait_for(asyncvnc.Client.create(r, JoinAuthChoice(w), u, p, None), 12)
         except PermissionError as e:
             raise Fail(f'VNC login refused: {e} (check MAC_REMOTE_USER and the password source; '
                        'do not retry in a loop, failed logins can lock the account)')
