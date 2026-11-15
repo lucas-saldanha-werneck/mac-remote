@@ -998,11 +998,16 @@ def time_now():
     return time.time()
 
 
+ARD_KEY_REQUEST = b'\x00\x00\x00\x0a\x01\x00RSA1\x00\x00\x00\x00'   # asyncvnc's Apple key request
+
+
 @unittest.skipUnless(REAL_ASYNCVNC, 'needs the real asyncvnc and cryptography')
 class VncLogin(unittest.TestCase):
-    """A fake screensharingd that behaves like the real one: it does ONE read for the auth-type
-    choice and, if that read holds only the type byte, takes the next packet's leading 0 as a new
-    auth type and hangs up ("viewer selected auth type 0 which was not advertised")."""
+    wrap = staticmethod(lambda w: mr.JoinAuthChoice(w))
+    """asyncvnc.Client.create through mr.JoinAuthChoice against a fake screensharingd that does
+    ONE read for the auth-type choice and hangs up if that read is not the type byte plus the key
+    request ("viewer selected auth type 0 which was not advertised"). Which read the real server
+    gets is timing, so the deterministic check is the list of writes that reach the socket."""
 
     def run_server(self, auth_result, client_writes):
         from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -1017,10 +1022,9 @@ class VncLogin(unittest.TestCase):
             await r.readexactly(12)
             w.write(b'\x01\x21')                                  # only Apple login offered
             await w.drain()
-            await asyncio.sleep(0.3)                               # slow new screensharingd
             first = await r.read(64)                               # ONE read, like the real server
             seen['first'] = first
-            if first != b'\x21' + mr.ARD_KEY_REQUEST:
+            if first != b'\x21' + ARD_KEY_REQUEST:
                 w.close()
                 return
             w.write(len(der).to_bytes(4, 'big') + b'\x01\x00' + len(der).to_bytes(4, 'big') + der + b'\x00')
@@ -1050,17 +1054,19 @@ class VncLogin(unittest.TestCase):
                 real_write(b)
             w.write = write
             try:
-                return await asyncio.wait_for(mr.vnc_login(r, w, 'lucas', 'pw-123'), 5)
+                return await asyncio.wait_for(
+                    sys.modules['asyncvnc'].Client.create(r, self.wrap(w), 'lucas', 'pw-123', None), 5)
             finally:
                 w.close()
                 srv.close()
+                await srv.wait_closed()
         return seen, asyncio.run(main())
 
     def test_type_byte_and_key_request_arrive_in_one_read(self):
         writes = []
         seen, client = self.run_server(0, writes)
-        self.assertEqual(seen['first'], b'\x21' + mr.ARD_KEY_REQUEST)
-        self.assertIn(b'\x21' + mr.ARD_KEY_REQUEST, writes, 'type byte and key request must be one write')
+        self.assertEqual(seen['first'], b'\x21' + ARD_KEY_REQUEST)
+        self.assertIn(b'\x21' + ARD_KEY_REQUEST, writes, 'type byte and key request must be one write')
         self.assertNotIn(b'\x21', writes, 'type byte written alone (the drop asyncvnc 1.3.0 causes)')
         self.assertEqual((seen['user'], seen['password']), ('lucas', 'pw-123'))
         self.assertEqual((client.video.width, client.video.height, client.video.name), (800, 600, 'Mac'))
@@ -1069,11 +1075,24 @@ class VncLogin(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.run_server(1, [])
 
-    def test_upstream_asyncvnc_still_writes_the_type_byte_alone(self):
-        """If this starts failing, asyncvnc changed its handshake: recheck vnc_login against it."""
-        import asyncvnc, inspect
-        src = inspect.getsource(asyncvnc.Client.create)
-        self.assertIn("writer.write(auth_type.to_bytes(1, 'big'))", src)
+    def test_other_writes_pass_through_unchanged(self):
+        w = FakeWriter()
+        calls = []
+        w.write = lambda b: calls.append(bytes(b))
+        j = mr.JoinAuthChoice(w)
+        for b in (b'RFB 003.008\n', b'\x02', b'challenge-reply', b'\x21', b'\x01'):
+            j.write(b)
+        self.assertEqual(calls, [b'RFB 003.008\n', b'\x02', b'challenge-reply', b'\x21', b'\x01'])
+
+    def test_only_the_first_lone_33_is_joined(self):
+        w = FakeWriter()
+        calls = []
+        w.write = lambda b: calls.append(bytes(b))
+        j = mr.JoinAuthChoice(w)
+        for b in (b'RFB 003.008\n', b'\x21', ARD_KEY_REQUEST, b'\x21', b'\x01'):
+            j.write(b)
+        self.assertEqual(calls, [b'RFB 003.008\n', b'\x21' + ARD_KEY_REQUEST, b'\x21', b'\x01'])
+        self.assertIs(j.close.__func__, FakeWriter.close)
 
 
 class Cli(unittest.TestCase):

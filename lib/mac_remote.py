@@ -246,66 +246,47 @@ def creds():
 
 
 # ---------- VNC ----------
-# Apple (ARD, type 33) key request, sent right after the auth-type byte.
-ARD_KEY_REQUEST = b'\x00\x00\x00\x0a\x01\x00RSA1\x00\x00\x00\x00'
+class JoinAuthChoice:
+    """Writer wrapper for asyncvnc.Client.create (1.3.0) that sends the Apple login choice
+    (the lone byte 33) in the same write as the next packet, the RSA key request.
+    asyncvnc writes them separately; when screensharingd's read lands between the two it sees
+    only the 1 byte, stays waiting for an auth type, reads the request's leading 0 as "auth type
+    0 which was not advertised" and drops the connection (IncompleteReadError here). Every good
+    login in the screensharingd log read the 15 bytes together; every drop read 1 byte alone.
+    Only the auth-choice write (the one right after the version string) is looked at, and only
+    a 33 there is held; other auth types (1, 2) and every later write pass through unchanged."""
 
+    def __init__(self, writer):
+        self._w = writer
+        self._n = 0
+        self._held = None
 
-async def vnc_login(reader, writer, username, password):
-    """Same handshake as asyncvnc.Client.create (1.3.0), with one change: the auth-type byte 33
-    and the RSA key request go out in ONE write. asyncvnc writes them separately; when
-    screensharingd's read lands between the two it sees only the 1 byte, stays waiting for an
-    auth type, reads the request's leading 0 as "auth type 0 which was not advertised" and drops
-    the connection (IncompleteReadError here). Every good login in the screensharingd log read
-    the 15 bytes together; every drop read 1 byte alone."""
-    import asyncvnc
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives.serialization import load_der_public_key
+    def write(self, data):
+        self._n += 1
+        if self._held is not None:
+            data, self._held = self._held + bytes(data), None
+        elif self._n == 2 and bytes(data) == b'\x21':
+            self._held = b'\x21'
+            return
+        if self._n >= 2:
+            self.write = self._w.write          # done: later writes go straight through
+        self._w.write(data)
 
-    intro = await reader.readline()
-    if intro[:4] != b'RFB ':
-        raise ValueError('not a VNC server')
-    writer.write(b'RFB 003.008\n')
-    auth_types = set(await reader.readexactly(await asyncvnc.read_int(reader, 1)))
-    if not auth_types:
-        raise ValueError(await asyncvnc.read_text(reader, 'utf-8'))
-    if 33 not in auth_types:
-        raise ValueError(f'Apple login (type 33) not offered by the server: {sorted(auth_types)}')
-    writer.write(b'\x21' + ARD_KEY_REQUEST)
-    await writer.drain()
-    await reader.readexactly(4)  # packet length
-    await reader.readexactly(2)  # packet version
-    host_key = load_der_public_key(await reader.readexactly(await asyncvnc.read_int(reader, 4)))
-    await reader.readexactly(1)  # unknown
-    aes_key = os.urandom(16)
-    encryptor = Cipher(algorithms.AES(aes_key), modes.ECB()).encryptor()
-    credentials = asyncvnc.pack_ard(username) + asyncvnc.pack_ard(password)
-    writer.write(b'\x00\x00\x01\x8a\x01\x00RSA1' +
-                 b'\x00\x01' + encryptor.update(credentials) +
-                 b'\x00\x01' + host_key.encrypt(aes_key, padding=padding.PKCS1v15()))
-    await reader.readexactly(4)  # unknown
-    auth_result = await asyncvnc.read_int(reader, 4)
-    if auth_result == 1:
-        raise PermissionError('Auth failed')
-    if auth_result == 2:
-        raise PermissionError('Auth failed (too many attempts)')
-    if auth_result != 0:
-        raise PermissionError((await reader.readexactly(auth_result)).decode('utf-8'))
-    return asyncvnc.Client(reader=reader, writer=writer, host_key=host_key,
-                           clipboard=asyncvnc.Clipboard(writer), keyboard=asyncvnc.Keyboard(writer),
-                           mouse=asyncvnc.Mouse(writer), video=await asyncvnc.Video.create(reader, writer))
+    def __getattr__(self, name):
+        return getattr(self._w, name)
 
 
 async def connect(cred=None):
+    import asyncvnc
     u, p = cred or creds()
     last = None
-    # vnc_login avoids the known drop; still retry other drops a few times,
+    # JoinAuthChoice avoids the known drop; still retry other drops a few times,
     # but never on PermissionError (wrong password -> avoid account lockout).
     for attempt in range(4):
         w = None
         try:
             r, w = await asyncio.wait_for(asyncio.open_connection(HOST, PORT, limit=2**22), 5)
-            return await asyncio.wait_for(vnc_login(r, w, u, p), 12)
+            return await asyncio.wait_for(asyncvnc.Client.create(r, JoinAuthChoice(w), u, p, None), 12)
         except PermissionError as e:
             raise Fail(f'VNC login refused: {e} (check MAC_REMOTE_USER and the password source; '
                        'do not retry in a loop, failed logins can lock the account)')
