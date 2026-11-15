@@ -29,7 +29,7 @@ Config (optional) ~/.config/popup-vigia/config, lines KEY=VALUE:
                                    messages go only to rodadas.log). Env POPUP_VIGIA_NOTIFY overrides it.
   NOTIFY_OK=text                   optional: text the command must print to count as delivered
   TESSERACT=/path/to/tesseract     default: found on PATH or in /opt/homebrew/bin
-  LANG=pt                          language of the notices: en (default) or pt. Env POPUP_VIGIA_LANG overrides it.
+  LANG=pt                          language of the notices: en or pt (default: the Mac's language). Env POPUP_VIGIA_LANG overrides it.
 
 Files:
   ~/Library/Logs/popup-vigia/cliques.jsonl  journal (an "intencao" line BEFORE the click, a "resultado" line after)
@@ -194,7 +194,7 @@ def avisa(tipo, texto, cada=3600):
 # ---------- notice texts (WhatsApp / NOTIFY_CMD) ----------
 # Each notice has up to 3 short lines: what happened / what the watcher did or did not do / what to do.
 # The raw OCR text never goes into a notice; it stays in rodadas.log and cliques.jsonl.
-# Language: env POPUP_VIGIA_LANG or config LANG (en or pt); default en.
+# Language: env POPUP_VIGIA_LANG or config LANG (en or pt); default: the Mac's language (pt or en).
 MSGS = {
     "nao-suportada": {
         "en": "Popup on the Mac: {what}.\nI did not click: I do not know these buttons.\nTo fix: answer the window on the Mac.",
@@ -287,8 +287,25 @@ _RE_PEDIDO = [
 
 
 def idioma():
-    v = (os.environ.get("POPUP_VIGIA_LANG") or load_config().get("LANG") or "en").strip().lower()
+    v = (os.environ.get("POPUP_VIGIA_LANG") or load_config().get("LANG") or system_lang()).strip().lower()
     return "pt" if v.startswith("pt") else "en"
+
+
+_SYSTEM_LANG = []
+
+
+def system_lang():
+    """pt when the first macOS language is Portuguese, else en. Read once per process."""
+    if not _SYSTEM_LANG:
+        try:
+            out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"], capture_output=True, text=True,
+                                 timeout=5).stdout
+            first = next((l.strip(' \t",') for l in out.splitlines() if l.strip(' \t",()')), "")
+        except (OSError, subprocess.SubprocessError):
+            first = ""
+        first = first or os.environ.get("LANG", "")
+        _SYSTEM_LANG.append("pt" if first.lower().startswith("pt") else "en")
+    return _SYSTEM_LANG[0]
 
 
 def pedido(texto):

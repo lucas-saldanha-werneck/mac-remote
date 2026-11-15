@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/mac-remote/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/mac-remote/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/mac-remote)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.8-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.9-blue)](CHANGELOG.md)
 [![mac-remote score](https://img.shields.io/badge/skill%20score-96.5%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 [![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-95.0%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
@@ -183,7 +183,7 @@ Run it with the mac-remote virtualenv Python (it needs Quartz and Pillow):
 
 Optional `~/.config/popup-vigia/config` (`KEY=VALUE` lines): `NOTIFY_CMD` (a command run as
 `command "<message>"` to notify you; default none, messages go to `rodadas.log`), `NOTIFY_OK` (text the
-command must print to count as delivered), `LANG` (`en` default, or `pt`: language of the notices), `TESSERACT` (path). Other commands: `log [N]`, `reset`,
+command must print to count as delivered), `LANG` (`en` or `pt`: language of the notices; default: the Mac's language), `TESSERACT` (path). Other commands: `log [N]`, `reset`,
 `sync-config` (copies the mac-remote config out of a synced folder, so launchd does not trigger a
 permission popup while reading it).
 
@@ -197,11 +197,11 @@ only when, in the same measurement, Dropbox uses at least 30% CPU and that daemo
 they stay separate, so you can see who really weighs.
 
 **Heavy Mac.** Load1 above 40 for 3 measurements in a row creates `~/.local/state/carga-vigia/pesado` (JSON:
-start, load, culprits) and sends **one** notice through `NOTIFY_CMD` (default `avisa-lucas`), at most 1 per
+start, load, culprits) and sends **one** notice through `NOTIFY_CMD` (default: none, the notice only goes to the log), at most 1 per
 30 minutes: what it is, who weighs, "robots will ask before acting". Load1 below 25 for 3 in a row removes the
 file (between 25 and 40 nothing changes); a "back to normal" notice goes out only after an episode longer
 than 10 minutes. Optional `~/.config/carga-vigia/config` (`KEY=VALUE`): `LOAD_ON=40`, `LOAD_OFF=25`,
-`SAMPLES=3`, `ALERT_EVERY=1800`, `RECOVER_MIN=600`, `KEEP_DAYS=7`, `LANG=pt` (notice language, `en` default),
+`SAMPLES=3`, `ALERT_EVERY=1800`, `RECOVER_MIN=600`, `KEEP_DAYS=7`, `LANG=pt` (notice language; default: the Mac's language), `NOTIFY_CMD` (none by default),
 `NOTIFY_CMD` (empty: log only).
 
 **What the plugin does with it (nothing is blocked):**

@@ -27,8 +27,10 @@ Usage:
 
 Config (optional) ~/.config/carga-vigia/config, lines KEY=VALUE (defaults in parentheses):
   LOAD_ON=40  LOAD_OFF=25  SAMPLES=3  ALERT_EVERY=1800  RECOVER_MIN=600  KEEP_DAYS=7
-  LANG=en|pt (en)   notice language. Env CARGA_VIGIA_LANG overrides it.
-  NOTIFY_CMD=avisa-lucas   run as `command "<message>"`. Env CARGA_VIGIA_NOTIFY overrides it. Empty: log only.
+  LANG=en|pt (the Mac's language: pt if macOS is set to Portuguese, else en)   notice language.
+             Env CARGA_VIGIA_LANG overrides it.
+  NOTIFY_CMD=/path/to/command (none)   run as `command "<message>"`. Env CARGA_VIGIA_NOTIFY overrides it.
+             Empty: log only.
 Files: ~/Library/Logs/carga-vigia/{carga.jsonl,rodadas.log}, ~/.local/state/carga-vigia/{pesado,contagem.json,aviso.json}
 """
 import json
@@ -49,8 +51,8 @@ DROPBOX_MIN_CPU, DAEMON_MIN_CPU = 30.0, 10.0
 
 def load_config():
     cfg = dict(DEFAULTS)
-    cfg["LANG"] = "en"
-    cfg["NOTIFY_CMD"] = "avisa-lucas"
+    cfg["LANG"] = ""
+    cfg["NOTIFY_CMD"] = ""
     try:
         with open(CONF) as f:
             for line in f:
@@ -70,7 +72,26 @@ def load_config():
         cfg["LANG"] = os.environ["CARGA_VIGIA_LANG"]
     if "CARGA_VIGIA_NOTIFY" in os.environ:
         cfg["NOTIFY_CMD"] = os.environ["CARGA_VIGIA_NOTIFY"]
+    if not cfg["LANG"]:
+        cfg["LANG"] = system_lang()
     return cfg
+
+
+_SYSTEM_LANG = []
+
+
+def system_lang():
+    """pt when the first macOS language is Portuguese, else en. Read once per process."""
+    if not _SYSTEM_LANG:
+        try:
+            out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"], capture_output=True, text=True,
+                                 timeout=5).stdout
+            first = next((l.strip(' \t",') for l in out.splitlines() if l.strip(' \t",()')), "")
+        except (OSError, subprocess.SubprocessError):
+            first = ""
+        first = first or os.environ.get("LANG", "")
+        _SYSTEM_LANG.append("pt" if first.lower().startswith("pt") else "en")
+    return _SYSTEM_LANG[0]
 
 
 def stamp(t=None):
