@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] - 2026-11-15
+- `popup-vigia`: the unlock deadline is 120 s (was 75 s; real unlocks took 74-80 s); the forced-lock watchdog is 185 s and the whole round 230 s, keeping the same margins.
+- `popup-vigia`: a plain "Don't Allow / Allow" popup is clicked even when OCR adds words from the screen behind the translucent dialog on the same line (words at least 2 text heights away from the pair are ignored; the forbidden-word block still reads the whole line).
+
 ## [0.4.3] - 2026-11-15
 - `popup-vigia`: an UNLOCK-FAILED lock caused by a timeout of the unlock call now expires like a connection drop (after 15 min, shared 3/day cap); a refused password still stays locked.
 
