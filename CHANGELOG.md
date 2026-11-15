@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.9] - 2026-11-15
+- Text follows the language of whoever installs the plugin. The heavy-Mac hook message is now in English and tells Claude to ask the user in their language (it was in Portuguese and named the author).
+- `carga-vigia` and `popup-vigia`: when `LANG` is not set, the notice language is the Mac's first language (`pt` if macOS is set to Portuguese, else `en`). Set `LANG` in the config to choose.
+- `carga-vigia`: `NOTIFY_CMD` has no default any more (it was the author's own `avisa-lucas`). Without it the notice only goes to the log, like `popup-vigia`.
+- New test: no personal names in `carga-vigia` and the hook.
+
 ## [0.4.8] - 2026-11-15
 - New `carga-vigia` (bin/carga-vigia, a LaunchAgent every 60 s): records load 1/5/15, free memory, swap and the 5 apps with most CPU and the 5 with most memory in `~/Library/Logs/carga-vigia/carga.jsonl` (7 days). Processes of one app are grouped (Dropbox + DropboxFileProvider = "Dropbox"); `fileproviderd` and `FPCKService` count as Dropbox only when Dropbox (30% CPU or more) and that daemon (10% or more) are high in the same measurement.
 - "Heavy Mac" state: load1 above 40 for 3 measurements in a row creates `~/.local/state/carga-vigia/pesado` and sends one notice through `NOTIFY_CMD` (default `avisa-lucas`, at most 1 per 30 min); below 25 for 3 in a row removes it (a "back to normal" notice only after an episode longer than 10 min). Thresholds and language (`LANG=pt`) in `~/.config/carga-vigia/config`.

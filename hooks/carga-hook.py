@@ -44,8 +44,9 @@ def main():
         pass
     cul = ", ".join("%s (%s)" % (c.get("app"), c.get("info")) for c in p.get("culpados", [])[:2]) or "?"
     hora = time.strftime("%H:%M", time.localtime(inicio))
-    msg = ("Mac pesado (carga %s, culpado %s desde %s). Antes de ações pesadas (muitas chamadas, robôs, builds, VNC), "
-           "pergunte ao Lucas com AskUserQuestion se pausa ou segue." % (p.get("carga"), cul, hora))
+    msg = ("Heavy Mac (load %s, culprit %s, since %s). Before heavy actions (many calls, robots, builds, VNC), "
+           "ask the user with AskUserQuestion whether to pause or go on. Write to them in their language."
+           % (p.get("carga"), cul, hora))
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": msg}}, ensure_ascii=False))
     return 0
 

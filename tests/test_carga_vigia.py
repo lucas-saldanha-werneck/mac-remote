@@ -278,7 +278,8 @@ class Hook(Base):
         self.heavy(t0)
         out = json.loads(self.run_hook('s1'))['hookSpecificOutput']
         self.assertEqual(out['hookEventName'], 'PreToolUse')
-        self.assertIn('Mac pesado (carga 107, culpado Dropbox (130% CPU) desde ', out['additionalContext'])
+        self.assertIn('Heavy Mac (load 107, culprit Dropbox (130% CPU), since ', out['additionalContext'])
+        self.assertIn('in their language', out['additionalContext'])
         self.assertIn('AskUserQuestion', out['additionalContext'])
         self.assertNotIn('permissionDecision', json.dumps(out))      # never blocks
         self.assertEqual(self.run_hook('s1'), '')                     # same session, same episode
@@ -371,6 +372,29 @@ class MacRemote(Base):
         with mock.patch.object(mr, 'cmd_lock', return_value=0), mock.patch.object(mr, 'espera_carga') as e:
             mr.main(['lock'])
         e.assert_not_called()
+
+
+
+
+class NoPersonalData(unittest.TestCase):
+    def test_no_personal_names_in_shipped_files(self):
+        for rel in (('bin', 'carga-vigia'), ('hooks', 'carga-hook.py')):
+            with open(os.path.join(ROOT, *rel), encoding='utf-8') as f:
+                src = f.read().lower()
+            for bad in ('lucas', 'avisa-lucas', '/users/'):
+                self.assertNotIn(bad, src, rel)
+
+    def test_default_language_follows_the_mac(self):
+        cv._SYSTEM_LANG[:] = ['pt']
+        try:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop('CARGA_VIGIA_LANG', None)
+                with mock.patch.object(cv, 'CONF', '/nonexistent/config'):
+                    cfg = cv.load_config()
+            self.assertEqual(cfg['LANG'], 'pt')
+            self.assertEqual(cfg['NOTIFY_CMD'], '')
+        finally:
+            cv._SYSTEM_LANG[:] = []
 
 
 if __name__ == '__main__':
