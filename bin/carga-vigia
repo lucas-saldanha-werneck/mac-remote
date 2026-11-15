@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""carga-vigia - watches the Mac's load and says who is heavy. Part of the mac-remote plugin.
+Run it every 60 s from launchd (see README). Python 3 standard library only.
+
+Each run (a "measurement") appends one line to ~/Library/Logs/carga-vigia/carga.jsonl: time, load 1/5/15,
+free memory, swap used/total, and the 5 apps with most CPU and the 5 with most memory. Lines older than
+7 days are dropped.
+
+"Heavy Mac" state: load1 above LOAD_ON (40) for SAMPLES (3) measurements in a row creates
+~/.local/state/carga-vigia/pesado (JSON: start, load, culprits) and sends ONE notice (at most 1 per
+ALERT_EVERY = 30 min). Load1 below LOAD_OFF (25) for SAMPLES in a row removes the file; a "back to normal"
+notice is sent only if the episode lasted more than RECOVER_MIN (10 min). Between 25 and 40 nothing changes
+(hysteresis). mac-remote and the Claude Code hook read that file; they never block anything.
+
+How processes are grouped (one entry per app):
+  - a process inside an .app bundle takes the bundle's name (Dropbox.app/.../DropboxFileProvider -> Dropbox,
+    Google Chrome Helper -> Google Chrome); other processes take their executable name (node, claude);
+  - fileproviderd and FPCKService (the macOS file-provider daemons) are counted as Dropbox ONLY when, in the
+    same measurement, Dropbox is using at least 30% CPU and that daemon at least 10%; otherwise they stay
+    separate, so a heavy fileproviderd caused by iCloud is not blamed on Dropbox.
+  CPU is the `ps` %CPU of each process, summed per app (more than 100% is possible on several cores).
+
+Usage:
+  carga-vigia            one measurement
+  carga-vigia status     last measurement and the heavy state
+  carga-vigia log [N]    last N measurements (default 5)
+
+Config (optional) ~/.config/carga-vigia/config, lines KEY=VALUE (defaults in parentheses):
+  LOAD_ON=40  LOAD_OFF=25  SAMPLES=3  ALERT_EVERY=1800  RECOVER_MIN=600  KEEP_DAYS=7
+  LANG=en|pt (en)   notice language. Env CARGA_VIGIA_LANG overrides it.
+  NOTIFY_CMD=avisa-lucas   run as `command "<message>"`. Env CARGA_VIGIA_NOTIFY overrides it. Empty: log only.
+Files: ~/Library/Logs/carga-vigia/{carga.jsonl,rodadas.log}, ~/.local/state/carga-vigia/{pesado,contagem.json,aviso.json}
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+LOGDIR = os.environ.get("CARGA_VIGIA_LOGDIR") or HOME + "/Library/Logs/carga-vigia"
+ST = os.environ.get("CARGA_VIGIA_STATE") or HOME + "/.local/state/carga-vigia"
+CONF = os.environ.get("CARGA_VIGIA_CONFIG") or HOME + "/.config/carga-vigia/config"
+DEFAULTS = {"LOAD_ON": 40.0, "LOAD_OFF": 25.0, "SAMPLES": 3, "ALERT_EVERY": 1800, "RECOVER_MIN": 600, "KEEP_DAYS": 7}
+DAEMONS = ("fileproviderd", "FPCKService")   # counted with Dropbox only when both are high at once
+DROPBOX_MIN_CPU, DAEMON_MIN_CPU = 30.0, 10.0
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    cfg["LANG"] = "en"
+    cfg["NOTIFY_CMD"] = "avisa-lucas"
+    try:
+        with open(CONF) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = (x.strip() for x in line.split("=", 1))
+                    if k in DEFAULTS:
+                        try:
+                            cfg[k] = type(DEFAULTS[k])(float(v))
+                        except ValueError:
+                            pass
+                    elif k in ("LANG", "NOTIFY_CMD"):
+                        cfg[k] = v
+    except OSError:
+        pass
+    if os.environ.get("CARGA_VIGIA_LANG"):
+        cfg["LANG"] = os.environ["CARGA_VIGIA_LANG"]
+    if "CARGA_VIGIA_NOTIFY" in os.environ:
+        cfg["NOTIFY_CMD"] = os.environ["CARGA_VIGIA_NOTIFY"]
+    return cfg
+
+
+def stamp(t=None):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t or time.time()))
+
+
+def rodada_log(text):
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    with open(LOGDIR + "/rodadas.log", "a") as f:
+        f.write("%s %s\n" % (stamp(), text))
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(path, obj):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+# ---------- collecting ----------
+def sh(cmd, timeout=15):
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                              timeout=timeout).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def parse_ps(text):
+    """`ps -axo pcpu=,rss=,comm=` lines -> [(cpu %, rss MB, command)]."""
+    rows = []
+    for line in text.splitlines():
+        m = re.match(r"\s*([\d.]+)\s+(\d+)\s+(.+?)\s*$", line)
+        if m:
+            rows.append((float(m.group(1)), int(m.group(2)) / 1024.0, m.group(3)))
+    return rows
+
+
+def app_name(comm):
+    m = re.search(r"/([^/]+)\.app(?:/|$)", comm)
+    if m:
+        return m.group(1)
+    base = os.path.basename(comm)
+    # Dropbox's file-provider extension sometimes shows only its executable name
+    return "Dropbox" if base.startswith("Dropbox") else base
+
+
+def agrupa(rows):
+    """Group processes by app. Returns {app: {"cpu": %, "mb": MB, "n": processes}}."""
+    apps = {}
+    for cpu, mb, comm in rows:
+        a = apps.setdefault(app_name(comm), {"cpu": 0.0, "mb": 0.0, "n": 0})
+        a["cpu"] += cpu
+        a["mb"] += mb
+        a["n"] += 1
+    db = apps.get("Dropbox")
+    if db and db["cpu"] >= DROPBOX_MIN_CPU:
+        for d in DAEMONS:
+            x = apps.get(d)
+            if x and x["cpu"] >= DAEMON_MIN_CPU:
+                for k in ("cpu", "mb", "n"):
+                    db[k] += x[k]
+                del apps[d]
+    return apps
+
+
+def top(apps, key, n=5):
+    items = sorted(apps.items(), key=lambda kv: kv[1][key], reverse=True)[:n]
+    return [{"app": k, "cpu": round(v["cpu"], 1), "mb": round(v["mb"]), "n": v["n"]} for k, v in items]
+
+
+def memoria():
+    """(free MB, swap used MB, swap total MB). Free = free + speculative pages from vm_stat."""
+    vm = sh(["/usr/bin/vm_stat"])
+    ps = re.search(r"page size of (\d+) bytes", vm)
+    page = int(ps.group(1)) if ps else 16384
+    pages = 0
+    for k in ("Pages free", "Pages speculative"):
+        m = re.search(k + r":\s+(\d+)", vm)
+        pages += int(m.group(1)) if m else 0
+    sw = sh(["/usr/sbin/sysctl", "-n", "vm.swapusage"])
+    t = re.search(r"total = ([\d.]+)M", sw)
+    u = re.search(r"used = ([\d.]+)M", sw)
+    return (round(pages * page / 1048576), round(float(u.group(1))) if u else 0, round(float(t.group(1))) if t else 0)
+
+
+def coleta():
+    load = os.getloadavg()
+    free, sw_u, sw_t = memoria()
+    apps = agrupa(parse_ps(sh(["/bin/ps", "-axo", "pcpu=,rss=,comm="])))
+    return {"ts": int(time.time()), "t": stamp(), "load": [round(x, 2) for x in load], "mem_free_mb": free,
+            "swap_used_mb": sw_u, "swap_total_mb": sw_t, "cpu_top": top(apps, "cpu"), "mem_top": top(apps, "mb")}
+
+
+# ---------- state machine ----------
+def culpados(m):
+    """Short list of who weighs: up to 2 apps by CPU (>= 20%), up to 2 by memory when memory is tight."""
+    out, seen = [], set()
+    for a in m["cpu_top"]:
+        if a["cpu"] >= 20 and len(out) < 2:
+            out.append((a["app"], "%d%% CPU" % round(a["cpu"])))
+            seen.add(a["app"])
+    if m["mem_free_mb"] < 300 or (m["swap_total_mb"] and m["swap_used_mb"] > 0.8 * m["swap_total_mb"]):
+        k = 0
+        for a in m["mem_top"]:
+            if a["app"] not in seen and k < 2:
+                out.append((a["app"], "%.1f GB" % (a["mb"] / 1024.0)))
+                seen.add(a["app"])
+                k += 1
+    if not out and m["cpu_top"]:
+        a = m["cpu_top"][0]
+        out.append((a["app"], "%d%% CPU" % round(a["cpu"])))
+    return out
+
+
+def passo(m, cfg, now=None):
+    """Advance the state machine by one measurement. Returns a list of actions: ("pesado", info), ("normal", info)."""
+    now = now or m["ts"]
+    p = ST + "/pesado"
+    c = load_json(ST + "/contagem.json", {"alto": 0, "baixo": 0})
+    atual = load_json(p, None) if os.path.exists(p) else None
+    load1, acts = m["load"][0], []
+    if atual is None:
+        c["alto"] = c["alto"] + 1 if load1 > cfg["LOAD_ON"] else 0
+        c["baixo"] = 0
+        if c["alto"] >= cfg["SAMPLES"]:
+            info = {"inicio": now, "inicio_txt": stamp(now), "carga": round(load1), "pico": round(load1),
+                    "culpados": [{"app": a, "info": i} for a, i in culpados(m)]}
+            save_json(p, info)
+            c["alto"] = 0
+            acts.append(("pesado", info))
+    else:
+        c["alto"] = 0
+        c["baixo"] = c["baixo"] + 1 if load1 < cfg["LOAD_OFF"] else 0
+        if load1 > atual.get("pico", 0):
+            atual["pico"] = round(load1)
+        atual["carga"] = round(load1)
+        if c["baixo"] >= cfg["SAMPLES"]:
+            os.remove(p)
+            c["baixo"] = 0
+            atual["fim"] = now
+            acts.append(("normal", atual))
+        else:
+            save_json(p, atual)
+    save_json(ST + "/contagem.json", c)
+    return acts
+
+
+# ---------- notices ----------
+MSGS = {
+    "pesado": {
+        "en": "Heavy Mac: load {carga}.\nWhat is heavy: {quem}.\nRobots will ask before acting.",
+        "pt": "Mac pesado: carga {carga}.\nQuem pesa: {quem}.\nRobôs vão perguntar antes de agir."},
+    "normal": {
+        "en": "Mac back to normal after {min} min (peak load {pico}).",
+        "pt": "Mac voltou ao normal depois de {min} min (pico de carga {pico})."},
+}
+
+
+def texto(tipo, info, lang):
+    quem = ", ".join("%s (%s)" % (c["app"], c["info"]) for c in info.get("culpados", [])) or "?"
+    mins = max(1, round((info.get("fim", time.time()) - info.get("inicio", 0)) / 60))
+    return MSGS[tipo]["pt" if lang == "pt" else "en"].format(
+        carga=info.get("carga"), quem=quem, min=mins, pico=info.get("pico"))
+
+
+def avisa(tipo, info, cfg, now=None):
+    """Send a notice. "pesado": at most 1 per ALERT_EVERY s (a failed send is retried after 5 min).
+    "normal": only if the episode lasted more than RECOVER_MIN s."""
+    now = now or time.time()
+    if tipo == "normal" and info.get("fim", now) - info.get("inicio", now) <= cfg["RECOVER_MIN"]:
+        return False
+    a = load_json(ST + "/aviso.json", {})
+    if tipo == "pesado":
+        if now - a.get("ok", 0) < cfg["ALERT_EVERY"] or now - a.get("try", 0) < 300:
+            return False
+        a["try"] = now
+        save_json(ST + "/aviso.json", a)
+    msg = texto(tipo, info, cfg["LANG"])
+    cmd = cfg["NOTIFY_CMD"]
+    if not cmd or os.environ.get("CARGA_VIGIA_SEM_AVISO"):
+        rodada_log("notice %s (not sent): %s" % (tipo, msg.replace("\n", " / ")))
+        sent = True
+    else:
+        try:
+            import shlex
+            rc = subprocess.run(shlex.split(cmd) + [msg], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=60).returncode
+        except (OSError, subprocess.SubprocessError):
+            rc = None
+        sent = rc == 0
+        rodada_log("notice %s: %s" % (tipo, "sent" if sent else "FAILED rc=%s" % rc))
+    if sent and tipo == "pesado":
+        a["ok"] = now
+        save_json(ST + "/aviso.json", a)
+    return sent
+
+
+# ---------- log ----------
+def grava(m):
+    os.makedirs(LOGDIR, mode=0o700, exist_ok=True)
+    with open(LOGDIR + "/carga.jsonl", "a") as f:
+        f.write(json.dumps(m, ensure_ascii=False) + "\n")
+
+
+def poda(cfg, now=None):
+    """Drop lines older than KEEP_DAYS; at most every 6 h."""
+    now = now or time.time()
+    mark, path = ST + "/poda", LOGDIR + "/carga.jsonl"
+    try:
+        if now - os.stat(mark).st_mtime < 6 * 3600:
+            return
+    except OSError:
+        pass
+    os.makedirs(ST, mode=0o700, exist_ok=True)
+    open(mark, "w").close()
+    corte = now - cfg["KEEP_DAYS"] * 86400
+    keep = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    if json.loads(line).get("ts", 0) >= corte:
+                        keep.append(line)
+                except ValueError:
+                    pass
+        with open(path + ".tmp", "w") as f:
+            f.writelines(keep)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+
+
+def rodada():
+    cfg = load_config()
+    m = coleta()
+    acts = passo(m, cfg)
+    m["pesado"] = os.path.exists(ST + "/pesado")
+    grava(m)
+    for tipo, info in acts:
+        rodada_log("%s: load %s, %s" % (tipo, info.get("carga"), texto(tipo, info, "en").replace("\n", " / ")))
+        avisa(tipo, info, cfg)
+    poda(cfg)
+    return 0
+
+
+def cmd_status():
+    p = ST + "/pesado"
+    try:
+        with open(LOGDIR + "/carga.jsonl") as f:
+            last = f.readlines()[-1]
+        m = json.loads(last)
+        print("last: %s load %s free %s MB swap %s/%s MB" % (m["t"], m["load"], m["mem_free_mb"], m["swap_used_mb"], m["swap_total_mb"]))
+    except (OSError, IndexError, ValueError):
+        print("no measurement yet")
+    if os.path.exists(p):
+        d = load_json(p, {})
+        print("HEAVY since %s: load %s, %s" % (d.get("inicio_txt"), d.get("carga"), d.get("culpados")))
+    else:
+        print("not heavy")
+    return 0
+
+
+def cmd_log(n):
+    try:
+        with open(LOGDIR + "/carga.jsonl") as f:
+            for line in f.readlines()[-n:]:
+                m = json.loads(line)
+                print("%s load %s free %sMB swap %s/%sMB cpu: %s" % (m["t"], m["load"], m["mem_free_mb"], m["swap_used_mb"],
+                      m["swap_total_mb"], ", ".join("%s %s%%" % (a["app"], round(a["cpu"])) for a in m["cpu_top"][:3])))
+    except OSError:
+        print("no log yet")
+    return 0
+
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a[:1] == ["status"]:
+        sys.exit(cmd_status())
+    if a[:1] == ["log"]:
+        sys.exit(cmd_log(int(a[1]) if len(a) > 1 else 5))
+    if a:
+        print(__doc__)
+        sys.exit(2)
+    try:
+        sys.exit(rodada())
+    except Exception as e:      # never leave launchd with a crash loop; the reason goes to the log
+        rodada_log("ERROR %r" % (e,))
+        sys.exit(1)
