@@ -141,6 +141,23 @@ class Forbidden(unittest.TestCase):
             self.assertIn('"fase": "bloqueada"', f.read())
 
 
+class UnlockLock(unittest.TestCase):
+    def test_connection_drop_expires(self):
+        self.assertEqual(pv.trava_transitoria("2026 mac-remote: unlock failed: VNC connect/login failed after 4 tries"),
+                         "connection drop")
+
+    def test_timeout_expires(self):
+        self.assertEqual(pv.trava_transitoria("2026-11-15 01:01:38 timeout of 75s exceeded"), "timeout")
+
+    def test_refused_stays_locked(self):
+        self.assertIsNone(pv.trava_transitoria("connect/login failed: login refused"))
+        self.assertIsNone(pv.trava_transitoria("timeout of 75s exceeded; password refused"))
+
+    def test_unknown_stays_locked(self):
+        self.assertIsNone(pv.trava_transitoria(""))
+        self.assertIsNone(pv.trava_transitoria("something else"))
+
+
 class Wiring(unittest.TestCase):
     def test_mac_remote_is_the_sibling_command(self):
         self.assertEqual(pv.MR, os.path.join(ROOT, 'bin', 'mac-remote'))

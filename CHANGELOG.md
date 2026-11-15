@@ -2,6 +2,9 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-11-15
+- `popup-vigia`: an UNLOCK-FAILED lock caused by a timeout of the unlock call now expires like a connection drop (after 15 min, shared 3/day cap); a refused password still stays locked.
+
 ## [0.4.2] - 2026-11-13
 - Skill: version and tags; Purpose, Prerequisites, Limitations and Troubleshooting sections.
 - README: demo video and badges (CI, license, version, skill score); adds SECURITY.md.
