@@ -1,0 +1,13 @@
+{
+  "description": "When carga-vigia reports a heavy Mac (load above 40), tell Claude once per episode to ask the user before heavy actions. Never blocks. Needs python3 on PATH; without it the hook does nothing.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Agent|Task|mcp__.*(computer|osascript|applescript|macos).*",
+        "hooks": [
+          { "type": "command", "command": "sh -c 'command -v python3 >/dev/null 2>&1 && exec python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/carga-hook.py\"; exit 0'", "timeout": 5 }
+        ]
+      }
+    ]
+  }
+}

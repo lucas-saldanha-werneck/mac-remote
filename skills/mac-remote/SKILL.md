@@ -2,7 +2,7 @@
 name: mac-remote
 description: 'See and control this Mac through macOS Screen Sharing (VNC), even when the screen is locked (unlocks with the Mac password from the configured secret source, holds the session, acts, locks again). Use when the user is away from the Mac and it needs a click, a popup closed, an app or a dialog handled; when they say "the screen is locked", "unlock the Mac", "click on the Mac", "what is on the screen?", "close that popup", "mac-remote"; or when another task is stuck on a macOS dialog that can only be solved on screen. Also to restart the Mac from far away with FileVault on ("restart the Mac", "reboot the Mac remotely").'
 argument-hint: "[status|unlock|shot|click|move|type|keys|lock|restart]"
-version: "0.4.7"
+version: "0.4.8"
 metadata:
   author: Lucas Saldanha Werneck <lucas@2olhares.com>
   tags: [remote, macos, vnc]
@@ -38,6 +38,10 @@ macOS locks the screen again about 1 s after the VNC session that unlocked it di
    - Prefer **`--app NAME`**: brings the app to the front and refuses if another app stays in front.
 5. `shot` again to check the result.
 6. **Always finish with `mac-remote lock`**: the holder drops the connection and macOS locks by itself. If it does not, the command falls back to Ctrl+Cmd+Q over VNC, then `pmset displaysleepnow`.
+
+## Heavy Mac (carga-vigia)
+
+If `mac-remote` prints "heavy Mac (load N, ...)" on stderr, or a hook message says "Mac pesado", the Mac is overloaded (load above 40, usually Dropbox or memory pressure). Nothing is blocked, but before heavy actions (many calls, robots, builds, VNC) ask the user with AskUserQuestion whether to pause or go on. For a single mac-remote command, `--wait-load [SECONDS]` (default 300) waits for the load to drop first. `carga-vigia status` shows the state and who weighs; `carga-vigia log` the last measurements. The watcher is optional: see the plugin README to install its LaunchAgent.
 
 ## Restart
 

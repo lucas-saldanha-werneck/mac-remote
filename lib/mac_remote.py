@@ -1372,6 +1372,39 @@ def cmd_restart(a):
     return 0
 
 
+def carga_pesado():
+    """The carga-vigia "heavy Mac" file as a dict, or None. Folder: $CARGA_VIGIA_STATE or ~/.local/state/carga-vigia."""
+    st = os.environ.get('CARGA_VIGIA_STATE') or os.path.expanduser('~/.local/state/carga-vigia')
+    try:
+        with open(os.path.join(st, 'pesado')) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def espera_carga(a, sleep=time.sleep, now=time.monotonic):
+    """Heavy-Mac courtesy (carga-vigia). Prints a 1-line notice to stderr and goes on; with --wait-load [S]
+    it first waits until the heavy state ends (up to S seconds, default 300). Never refuses."""
+    p = carga_pesado()
+    if not p:
+        return
+    quem = ', '.join(c.get('app', '?') for c in (p.get('culpados') or [])[:2]) or '?'
+    since = time.strftime('%H:%M', time.localtime(p.get('inicio', time.time())))
+    wait = getattr(a, 'wait_load', None)
+    if wait is not None:
+        end = now() + wait
+        print(f'mac-remote: heavy Mac (load {p.get("carga")}, {quem} since {since}); waiting up to {wait} s for it to calm down',
+              file=sys.stderr)
+        while carga_pesado() and now() < end:
+            sleep(min(5, max(0.0, end - now())))
+        if carga_pesado():
+            print('mac-remote: still heavy after the wait; going on', file=sys.stderr)
+        return
+    print(f'mac-remote: heavy Mac (load {p.get("carga")}, {quem} since {since}); going on anyway '
+          '(--wait-load [SECONDS] waits for it to calm down)', file=sys.stderr)
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ['_holder']:
@@ -1398,17 +1431,23 @@ def main(argv=None):
     u.add_argument('--idle-timeout', '--auto-lock', dest='idle_timeout', type=int, default=DEFAULT_IDLE, metavar='SECONDS',
                    help=f'holder exits (screen re-locks) after N s without commands or local input (default {DEFAULT_IDLE}). '
                         'If already held, re-arms it.')
+    u.add_argument('--wait-load', nargs='?', const=300, type=int, metavar='SECONDS',
+                     help='if the Mac is heavy (carga-vigia), wait until it calms down, up to SECONDS (default 300), then go on')
     lk = sp.add_parser('lock', help='release the held session (macOS re-locks); fallback Ctrl+Cmd+Q, pmset')
     lk.add_argument('--force', action='store_true', help='lock even if someone seems to be using the Mac')
     s = sp.add_parser('shot', help='screenshot (JPG, max 1600 px); prints path and display rects')
     s.add_argument('path', nargs='?', help=f'output .jpg (default {SHOT_DIR}/shot-*.jpg)')
     s.add_argument('--display', type=int, metavar='N', help='only display N (index as printed)')
+    s.add_argument('--wait-load', nargs='?', const=300, type=int, metavar='SECONDS',
+                     help='if the Mac is heavy (carga-vigia), wait until it calms down, up to SECONDS (default 300), then go on')
     for name, hlp in (('click', 'click at X Y (pixels of the last shot image)'), ('move', 'move the pointer to X Y')):
         c = sp.add_parser(name, help=hlp)
         c.add_argument('x', type=float); c.add_argument('y', type=float)
         c.add_argument('--raw', action='store_true', help='X Y are framebuffer coordinates, not last-shot image pixels')
         c.add_argument('--force', action='store_true', help='send even if someone seems to be using the Mac')
         c.add_argument('--app', metavar='NAME', help='activate this app first; refuse if it is not frontmost')
+        c.add_argument('--wait-load', nargs='?', const=300, type=int, metavar='SECONDS',
+                         help='if the Mac is heavy (carga-vigia), wait until it calms down, up to SECONDS (default 300), then go on')
         if name == 'click':
             g = c.add_mutually_exclusive_group()
             g.add_argument('--right', action='store_true'); g.add_argument('--double', action='store_true')
@@ -1416,9 +1455,13 @@ def main(argv=None):
             c.set_defaults(right=False, double=False)
     t = sp.add_parser('type', help='type text (NOT for passwords/secrets)')
     t.add_argument('text'); t.add_argument('--force', action='store_true')
+    t.add_argument('--wait-load', nargs='?', const=300, type=int, metavar='SECONDS',
+                     help='if the Mac is heavy (carga-vigia), wait until it calms down, up to SECONDS (default 300), then go on')
     t.add_argument('--app', metavar='NAME', help='activate this app first; refuse if it is not frontmost (recommended)')
     k = sp.add_parser('keys', help='key combos, e.g. cmd+tab, ctrl+tab, cmd+shift+4, return, esc')
     k.add_argument('combo', nargs='+'); k.add_argument('--force', action='store_true')
+    k.add_argument('--wait-load', nargs='?', const=300, type=int, metavar='SECONDS',
+                     help='if the Mac is heavy (carga-vigia), wait until it calms down, up to SECONDS (default 300), then go on')
     k.add_argument('--app', metavar='NAME', help='activate this app first; refuse if it is not frontmost (recommended)')
     r = sp.add_parser('restart', help='restart this Mac; with FileVault, skip the disk password screen once (authrestart)')
     g = r.add_mutually_exclusive_group(required=True)
@@ -1430,6 +1473,8 @@ def main(argv=None):
     os.makedirs(HOME, mode=0o700, exist_ok=True)
     os.chmod(HOME, 0o700)
     try:
+        if a.cmd in ('unlock', 'shot', 'click', 'move', 'type', 'keys'):
+            espera_carga(a)
         return {'status': cmd_status, 'unlock': cmd_unlock, 'lock': cmd_lock, 'shot': cmd_shot,
                 'click': lambda a: cmd_mouse(a, 'click'), 'move': lambda a: cmd_mouse(a, 'move'),
                 'type': cmd_type, 'keys': cmd_keys, 'restart': cmd_restart}[a.cmd](a)

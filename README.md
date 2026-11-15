@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lucas-saldanha-werneck/mac-remote/actions/workflows/test.yml/badge.svg)](https://github.com/lucas-saldanha-werneck/mac-remote/actions/workflows/test.yml)
 [![License](https://img.shields.io/github/license/lucas-saldanha-werneck/mac-remote)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.2-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.8-blue)](CHANGELOG.md)
 [![mac-remote score](https://img.shields.io/badge/skill%20score-96.5%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator)
 [![plugin score (proposal)](https://img.shields.io/badge/plugin%20score%20(proposal)-95.0%20A-brightgreen)](https://github.com/NVIDIA/SkillEvaluator/issues/508)
 
@@ -186,6 +186,63 @@ Optional `~/.config/popup-vigia/config` (`KEY=VALUE` lines): `NOTIFY_CMD` (a com
 command must print to count as delivered), `LANG` (`en` default, or `pt`: language of the notices), `TESSERACT` (path). Other commands: `log [N]`, `reset`,
 `sync-config` (copies the mac-remote config out of a synced folder, so launchd does not trigger a
 permission popup while reading it).
+
+## carga-vigia: warn when the Mac is heavy, and stop piling on
+
+`bin/carga-vigia` is an optional watcher (Python standard library only). Every 60 s (from launchd) it
+appends one line to `~/Library/Logs/carga-vigia/carga.jsonl`: time, load 1/5/15, free memory, swap used/total,
+and the 5 apps using most CPU and the 5 using most memory (7 days are kept). Processes of one app are summed
+(`Dropbox` + `DropboxFileProvider` = "Dropbox"). `fileproviderd` and `FPCKService` are counted as Dropbox
+only when, in the same measurement, Dropbox uses at least 30% CPU and that daemon at least 10%; otherwise
+they stay separate, so you can see who really weighs.
+
+**Heavy Mac.** Load1 above 40 for 3 measurements in a row creates `~/.local/state/carga-vigia/pesado` (JSON:
+start, load, culprits) and sends **one** notice through `NOTIFY_CMD` (default `avisa-lucas`), at most 1 per
+30 minutes: what it is, who weighs, "robots will ask before acting". Load1 below 25 for 3 in a row removes the
+file (between 25 and 40 nothing changes); a "back to normal" notice goes out only after an episode longer
+than 10 minutes. Optional `~/.config/carga-vigia/config` (`KEY=VALUE`): `LOAD_ON=40`, `LOAD_OFF=25`,
+`SAMPLES=3`, `ALERT_EVERY=1800`, `RECOVER_MIN=600`, `KEEP_DAYS=7`, `LANG=pt` (notice language, `en` default),
+`NOTIFY_CMD` (empty: log only).
+
+**What the plugin does with it (nothing is blocked):**
+
+- `mac-remote unlock/shot/click/move/type/keys` print one warning line on stderr while the file exists and go on.
+  `--wait-load [SECONDS]` (default 300) waits for the file to disappear first, then goes on even if it did not.
+- A PreToolUse hook (`hooks/carga-hook.py`, for Bash, Agent/Task and computer-control tools) tells Claude, once
+  per session and per heavy episode, to ask you with `AskUserQuestion` whether to pause or go on before heavy
+  actions. It reads one file; no network.
+
+Install (the plugin does not do this by itself): a launcher in `~/.local/bin` that finds the installed plugin,
+and a LaunchAgent that runs it every 60 s.
+
+```sh
+cat > ~/.local/bin/carga-vigia <<'EOF2'
+#!/usr/bin/env python3
+import json, os, sys
+ent = json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json")))["plugins"]["mac-remote@lucas-tools"]
+path = (ent[0] if isinstance(ent, list) else ent)["installPath"]
+os.execv(sys.executable, [sys.executable, os.path.join(path, "bin", "carga-vigia")] + sys.argv[1:])
+EOF2
+chmod +x ~/.local/bin/carga-vigia
+mkdir -p ~/Library/Logs/carga-vigia ~/.config/carga-vigia
+printf 'LANG=pt\n' > ~/.config/carga-vigia/config
+cat > ~/Library/LaunchAgents/com.lucas.carga-vigia.plist <<EOF2
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.lucas.carga-vigia</string>
+<key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>$HOME/.local/bin/carga-vigia</string></array>
+<key>StartInterval</key><integer>60</integer>
+<key>ProcessType</key><string>Background</string>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>PYTHONDONTWRITEBYTECODE</key><string>1</string><key>HOME</key><string>$HOME</string></dict>
+<key>StandardOutPath</key><string>$HOME/Library/Logs/carga-vigia/launchd.out</string>
+<key>StandardErrorPath</key><string>$HOME/Library/Logs/carga-vigia/launchd.out</string>
+</dict></plist>
+EOF2
+plutil -lint ~/Library/LaunchAgents/com.lucas.carga-vigia.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.lucas.carga-vigia.plist
+carga-vigia status        # `carga-vigia log 5` shows the last measurements
+```
 
 ## Requirements
 

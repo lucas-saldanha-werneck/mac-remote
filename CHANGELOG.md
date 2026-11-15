@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.8] - 2026-11-15
+- New `carga-vigia` (bin/carga-vigia, a LaunchAgent every 60 s): records load 1/5/15, free memory, swap and the 5 apps with most CPU and the 5 with most memory in `~/Library/Logs/carga-vigia/carga.jsonl` (7 days). Processes of one app are grouped (Dropbox + DropboxFileProvider = "Dropbox"); `fileproviderd` and `FPCKService` count as Dropbox only when Dropbox (30% CPU or more) and that daemon (10% or more) are high in the same measurement.
+- "Heavy Mac" state: load1 above 40 for 3 measurements in a row creates `~/.local/state/carga-vigia/pesado` and sends one notice through `NOTIFY_CMD` (default `avisa-lucas`, at most 1 per 30 min); below 25 for 3 in a row removes it (a "back to normal" notice only after an episode longer than 10 min). Thresholds and language (`LANG=pt`) in `~/.config/carga-vigia/config`.
+- `mac-remote` unlock/shot/click/move/type/keys: when the heavy state is on, print a 1-line warning on stderr and go on as usual. New `--wait-load [SECONDS]` waits (default 300 s) for the heavy state to end first; it never refuses.
+- New PreToolUse hook (`hooks/hooks.json`, `hooks/carga-hook.py`) for Bash, Agent/Task and computer-control tools: during a heavy episode it tells Claude once per session to ask with AskUserQuestion before heavy actions. It blocks nothing.
+
 ## [0.4.7] - 2026-11-15
 - VNC login no longer drops about 1 in 6 connections. asyncvnc sends the Apple login choice (byte 33) and the RSA key request as two writes; when screensharingd read between them it took the request's leading 0 as a second, unoffered login type ("viewer selected auth type 0 which was not advertised") and closed the connection (IncompleteReadError). mac-remote now passes asyncvnc a thin writer wrapper (`JoinAuthChoice`) that sends both in one write; the rest of the asyncvnc login, including its fallback to other auth types, is unchanged. In the screensharingd log every good login read the 15 bytes together and every drop read the 1 byte alone. The 4 retries stay.
 
