@@ -225,7 +225,7 @@ os.execv(sys.executable, [sys.executable, os.path.join(path, "bin", "carga-vigia
 EOF2
 chmod +x ~/.local/bin/carga-vigia
 mkdir -p ~/Library/Logs/carga-vigia ~/.config/carga-vigia
-printf 'LANG=pt\n' > ~/.config/carga-vigia/config
+# optional: printf 'LANG=pt\nNOTIFY_CMD=/path/to/notifier\n' > ~/.config/carga-vigia/config  (default: the Mac's language, log only)
 cat > ~/Library/LaunchAgents/com.lucas.carga-vigia.plist <<EOF2
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
