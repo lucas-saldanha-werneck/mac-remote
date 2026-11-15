@@ -998,6 +998,84 @@ def time_now():
     return time.time()
 
 
+@unittest.skipUnless(REAL_ASYNCVNC, 'needs the real asyncvnc and cryptography')
+class VncLogin(unittest.TestCase):
+    """A fake screensharingd that behaves like the real one: it does ONE read for the auth-type
+    choice and, if that read holds only the type byte, takes the next packet's leading 0 as a new
+    auth type and hangs up ("viewer selected auth type 0 which was not advertised")."""
+
+    def run_server(self, auth_result, client_writes):
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        der = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        seen = {}
+
+        async def handle(r, w):
+            w.write(b'RFB 003.889\n')
+            await r.readexactly(12)
+            w.write(b'\x01\x21')                                  # only Apple login offered
+            await w.drain()
+            await asyncio.sleep(0.3)                               # slow new screensharingd
+            first = await r.read(64)                               # ONE read, like the real server
+            seen['first'] = first
+            if first != b'\x21' + mr.ARD_KEY_REQUEST:
+                w.close()
+                return
+            w.write(len(der).to_bytes(4, 'big') + b'\x01\x00' + len(der).to_bytes(4, 'big') + der + b'\x00')
+            msg = await r.readexactly(4 + 0x18a)
+            enc_creds, enc_key = msg[12:140], msg[142:]
+            aes = key.decrypt(enc_key, padding.PKCS1v15())
+            creds = Cipher(algorithms.AES(aes), modes.ECB()).decryptor().update(enc_creds)
+            seen['user'] = creds[:64].split(b'\x00')[0].decode()
+            seen['password'] = creds[64:].split(b'\x00')[0].decode()
+            w.write(b'\x00\x00\x00\x00' + auth_result.to_bytes(4, 'big'))
+            if auth_result == 0:
+                await r.readexactly(1)                             # ClientInit
+                w.write((800).to_bytes(2, 'big') + (600).to_bytes(2, 'big') + bytes(16) +
+                        (3).to_bytes(4, 'big') + b'Mac')
+            await w.drain()
+            await asyncio.sleep(0.2)
+            w.close()
+
+        async def main():
+            srv = await asyncio.start_server(handle, '127.0.0.1', 0)
+            port = srv.sockets[0].getsockname()[1]
+            r, w = await asyncio.open_connection('127.0.0.1', port)
+            real_write = w.write
+
+            def write(b):
+                client_writes.append(bytes(b))
+                real_write(b)
+            w.write = write
+            try:
+                return await asyncio.wait_for(mr.vnc_login(r, w, 'lucas', 'pw-123'), 5)
+            finally:
+                w.close()
+                srv.close()
+        return seen, asyncio.run(main())
+
+    def test_type_byte_and_key_request_arrive_in_one_read(self):
+        writes = []
+        seen, client = self.run_server(0, writes)
+        self.assertEqual(seen['first'], b'\x21' + mr.ARD_KEY_REQUEST)
+        self.assertIn(b'\x21' + mr.ARD_KEY_REQUEST, writes, 'type byte and key request must be one write')
+        self.assertNotIn(b'\x21', writes, 'type byte written alone (the drop asyncvnc 1.3.0 causes)')
+        self.assertEqual((seen['user'], seen['password']), ('lucas', 'pw-123'))
+        self.assertEqual((client.video.width, client.video.height, client.video.name), (800, 600, 'Mac'))
+
+    def test_wrong_password_raises_permission_error(self):
+        with self.assertRaises(PermissionError):
+            self.run_server(1, [])
+
+    def test_upstream_asyncvnc_still_writes_the_type_byte_alone(self):
+        """If this starts failing, asyncvnc changed its handshake: recheck vnc_login against it."""
+        import asyncvnc, inspect
+        src = inspect.getsource(asyncvnc.Client.create)
+        self.assertIn("writer.write(auth_type.to_bytes(1, 'big'))", src)
+
+
 class Cli(unittest.TestCase):
     def test_help(self):
         r = subprocess.run([os.path.join(ROOT, 'bin', 'mac-remote'), '--help'],
