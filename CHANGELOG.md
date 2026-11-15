@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] - 2026-11-15
+- `popup-vigia`: a notice about a window whose request sentence wraps no longer carries words OCR read from the window behind the dialog ("pede: | off . Mar files managed by ..."); junk at the start of a wrapped line and after the sentence is dropped, and an unknown request that still looks dirty becomes "a permission window".
+- `popup-vigia`: plain notices (both languages) for "access files in your X" without the word folder, "access files managed by X" (Dropbox, iCloud Drive) and the Apple Music media library request. Tests use every real request text from the click journal.
+
 ## [0.4.5] - 2026-11-15
 - `popup-vigia`: rewrote every notice as up to 3 short lines (what happened, what the watcher did, what to do, with the exact command such as `popup-vigia reset`). A notice about a window now names the app and the request ("Grok Bot" wants to access files in your Desktop folder) instead of dumping the raw OCR text; when nothing clean is found it says "a permission window". The full OCR text stays in `rodadas.log` and `cliques.jsonl`.
 - `popup-vigia`: new language setting for the notices, `LANG=pt` in `~/.config/popup-vigia/config` (or env `POPUP_VIGIA_LANG`); `en` is the default.
