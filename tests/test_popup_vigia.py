@@ -190,6 +190,63 @@ class UnlockLock(unittest.TestCase):
         self.assertIsNone(pv.trava_transitoria("something else"))
 
 
+class Notices(unittest.TestCase):
+    # Real-looking OCR dump of the whole window box (15/11): background text, the dialog, the button row.
+    DUMP = ("& This compu {5 Projects - ~ dou fazer isso.\n"
+            "\u201cGrok Bot.app\u201d would like to access files in your Desktop folder.\n"
+            "Don't Allow Allow Restart rela 14 finished")
+
+    def test_unsupported_window_portuguese(self):
+        t = pv.monta('nao-suportada', self.DUMP, lang='pt')
+        self.assertEqual(t.split('\n')[0], 'Popup no Mac: "Grok Bot" quer acessar a pasta Desktop.')
+        self.assertEqual(len(t.split('\n')), 3)
+        for junk in ('compu', 'Restart', 'Projects', 'OCR'):
+            self.assertNotIn(junk, t)
+
+    def test_unsupported_window_english(self):
+        t = pv.monta('nao-suportada', self.DUMP, lang='en')
+        self.assertEqual(t.split('\n')[0], 'Popup on the Mac: "Grok Bot" wants to access files in your Desktop folder.')
+        self.assertNotIn('Restart', t)
+
+    def test_allow_to_phrase_and_unknown_request(self):
+        t = pv.monta('nao-suportada', 'Allow \u201cclaude\u201d to find devices on local networks?\nDon\u2019t Allow Allow', lang='pt')
+        self.assertIn('"claude" quer encontrar dispositivos na rede local', t)
+        t = pv.monta('nao-suportada', '\u201cFoo\u201d would like to fly the moon.\nDon\'t Allow Allow', lang='pt')
+        self.assertIn('"Foo" pede: fly the moon', t)
+
+    def test_nothing_clean_found_gives_generic_phrase(self):
+        t = pv.monta('nao-suportada', 'garbage ~ | ?? lorem\nrandom words here', lang='pt')
+        self.assertTrue(t.startswith('Popup no Mac: uma janela de permiss\u00e3o.'))
+        self.assertNotIn('garbage', t)
+
+    def test_lock_notice(self):
+        t = pv.monta('trava', lang='pt', motivo=pv.MSGS['trava-UNLOCK-FAILED']['pt'])
+        self.assertEqual(t.split('\n')[0], 'Parei de vigiar o Mac: n\u00e3o consegui desbloquear a tela.')
+        self.assertIn('`popup-vigia reset`', t)
+        self.assertNotIn('UNLOCK-FAILED', t)
+        self.assertIn('could not unlock the screen', pv.monta('trava', lang='en', motivo=pv.MSGS['trava-UNLOCK-FAILED']['en']))
+
+    def test_every_notice_has_both_languages_and_at_most_3_lines(self):
+        kw = dict(n=3, erro='x', pasta='/p', motivo='m', mr='/m', min=4, what='w')
+        for k, v in pv.MSGS.items():
+            self.assertEqual(set(v), {'en', 'pt'}, k)
+            for lg in ('en', 'pt'):
+                t = v[lg].format(**kw)
+                self.assertLessEqual(len(t.split('\n')), 3, k)
+                self.assertNotIn('OCR', t)
+
+    def test_language_setting(self):
+        self.assertEqual(pv.idioma(), 'en')
+        with open(pv.CONF, 'w') as f:
+            f.write('LANG=pt\n')
+        try:
+            self.assertEqual(pv.idioma(), 'pt')
+            with mock.patch.dict(os.environ, {'POPUP_VIGIA_LANG': 'en'}):
+                self.assertEqual(pv.idioma(), 'en')
+        finally:
+            os.remove(pv.CONF)
+
+
 class Wiring(unittest.TestCase):
     def test_mac_remote_is_the_sibling_command(self):
         self.assertEqual(pv.MR, os.path.join(ROOT, 'bin', 'mac-remote'))

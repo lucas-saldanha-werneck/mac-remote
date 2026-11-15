@@ -29,6 +29,7 @@ Config (optional) ~/.config/popup-vigia/config, lines KEY=VALUE:
                                    messages go only to rodadas.log). Env POPUP_VIGIA_NOTIFY overrides it.
   NOTIFY_OK=text                   optional: text the command must print to count as delivered
   TESSERACT=/path/to/tesseract     default: found on PATH or in /opt/homebrew/bin
+  LANG=pt                          language of the notices: en (default) or pt. Env POPUP_VIGIA_LANG overrides it.
 
 Files:
   ~/Library/Logs/popup-vigia/cliques.jsonl  journal (an "intencao" line BEFORE the click, a "resultado" line after)
@@ -170,10 +171,10 @@ def avisa(tipo, texto, cada=3600):
     open(try_f, "w").close()
     if not cmd:
         open(ok_f, "w").close()
-        rodada_log("notice %s: %s" % (tipo, texto))
+        rodada_log("notice %s: %s" % (tipo, texto.replace("\n", " / ")))
         return
     if os.environ.get("POPUP_VIGIA_SEM_AVISO"):
-        rodada_log("notice(not sent, test) %s: %s" % (tipo, texto))
+        rodada_log("notice(not sent, test) %s: %s" % (tipo, texto.replace("\n", " / ")))
         return
     if os.fork() != 0:
         return
@@ -188,6 +189,126 @@ def avisa(tipo, texto, cada=3600):
         rodada_log("notice %s: %s" % (tipo, "sent" if sent else "FAILED rc=%s" % rc))
     finally:
         os._exit(0)
+
+
+# ---------- notice texts (WhatsApp / NOTIFY_CMD) ----------
+# Each notice has up to 3 short lines: what happened / what the watcher did or did not do / what to do.
+# The raw OCR text never goes into a notice; it stays in rodadas.log and cliques.jsonl.
+# Language: env POPUP_VIGIA_LANG or config LANG (en or pt); default en.
+MSGS = {
+    "nao-suportada": {
+        "en": "Popup on the Mac: {what}.\nI did not click: I do not know these buttons.\nTo fix: answer the window on the Mac.",
+        "pt": "Popup no Mac: {what}.\nNão cliquei: não reconheci os botões.\nPara resolver: responda a janela no Mac."},
+    "bloqueada": {
+        "en": "Popup on the Mac: {what}.\nI did not click: it talks about resetting or erasing (reset/keychain).\nTo fix: decide on the Mac. Do not press Reset To Defaults.",
+        "pt": "Popup no Mac: {what}.\nNão cliquei: fala em apagar ou redefinir (reset/keychain).\nPara resolver: decida no Mac. Não aperte Reset To Defaults."},
+    "sem-resultado": {
+        "en": "I clicked a permission window and do not know if it worked.\nI will not click that window again.\nTo fix: look at the Mac screen, then run `popup-vigia reset`.",
+        "pt": "Cliquei numa janela de permissão e não sei se deu certo.\nNão vou clicar de novo nessa janela.\nPara resolver: olhe a tela do Mac e rode `popup-vigia reset`."},
+    "sem-resultado-erro": {
+        "en": "I tried to click a permission window and got an error. The click may or may not have arrived.\nI will not click that window again.\nTo fix: look at the Mac screen, then run `popup-vigia reset`.",
+        "pt": "Tentei clicar numa janela de permissão e deu erro. O clique pode ter chegado ou não.\nNão vou clicar de novo nessa janela.\nPara resolver: olhe a tela do Mac e rode `popup-vigia reset`."},
+    "teimosa": {
+        "en": "A permission window is still on screen after {n} clicks.\nI stopped clicking it.\nTo fix: answer it on the Mac.",
+        "pt": "A janela de permissão continua na tela depois de {n} cliques.\nParei de clicar nela.\nPara resolver: responda no Mac."},
+    "registro": {
+        "en": "I cannot write the click journal ({erro}).\nI stopped clicking.\nTo fix: check the disk and the folder {pasta}.",
+        "pt": "Não consigo gravar o diário de cliques ({erro}).\nParei de clicar.\nPara resolver: confira o disco e a pasta {pasta}."},
+    "trava": {
+        "en": "I stopped watching the Mac: {motivo}.\nI will not click or try to unlock until you reset me.\nTo fix: on the Mac, run `popup-vigia reset`.",
+        "pt": "Parei de vigiar o Mac: {motivo}.\nNão vou clicar nem tentar desbloquear até você me liberar.\nPara resolver: no Mac, rode `popup-vigia reset`."},
+    "trava-UNLOCK-FAILED": {"en": "I could not unlock the screen", "pt": "não consegui desbloquear a tela"},
+    "trava-RELOCK-FAILED": {"en": "I could not lock the screen again", "pt": "não consegui bloquear a tela de novo"},
+    "mr": {
+        "en": "The mac-remote program is missing ({mr}).\nWithout it I cannot see or click anything.\nTo fix: reinstall the mac-remote plugin.",
+        "pt": "O programa mac-remote não foi encontrado ({mr}).\nSem ele não consigo ver nem clicar.\nPara resolver: reinstale o plugin mac-remote."},
+    "sem-janela": {
+        "en": "{n} permission request(s) are waiting and I cannot see the window.\nI clicked nothing.\nTo fix: look at the Mac screen.",
+        "pt": "{n} pedido(s) de permissão esperando e não vejo a janela.\nNão cliquei em nada.\nPara resolver: olhe a tela do Mac."},
+    "unlock": {
+        "en": "I could not unlock the screen ({n} permission request(s) waiting).\nI stopped trying.\nTo fix: look at the Mac, then run `popup-vigia reset`.",
+        "pt": "Não consegui desbloquear a tela ({n} pedido(s) de permissão esperando).\nParei de tentar.\nPara resolver: olhe o Mac e rode `popup-vigia reset`."},
+    "relock": {
+        "en": "I unlocked the screen and could not lock it again.\nThe automatic lock tries again within {min} min.\nTo fix: lock the Mac now, then run `popup-vigia reset`.",
+        "pt": "Desbloqueei a tela e não consegui bloquear de novo.\nO bloqueio automático tenta de novo em até {min} min.\nPara resolver: bloqueie o Mac agora e rode `popup-vigia reset`."},
+}
+NADA = {"en": "a permission window", "pt": "uma janela de permissão"}
+APP_ANON = {"en": "an app", "pt": "um app"}
+QUERO = {"en": "wants to", "pt": "quer"}
+PEDE = {"en": "asks:", "pt": "pede:"}
+# Known requests, English dialog text -> Portuguese. Anything else is shown in English as the dialog says it.
+ACOES_PT = [
+    (r"access files in your (\w+) folder", lambda m: "acessar a pasta " + m.group(1)),
+    (r"access (?:data|files) from other apps", lambda m: "acessar dados de outros apps"),
+    (r"find devices on local networks?", lambda m: "encontrar dispositivos na rede local"),
+    (r"control this computer|use accessibility", lambda m: "controlar este computador"),
+    (r"record (?:the |this computer'?s )?screen", lambda m: "gravar a tela"),
+    (r"access the microphone", lambda m: "usar o microfone"),
+    (r"access the camera", lambda m: "usar a câmera"),
+    (r"send you notifications", lambda m: "enviar notificações"),
+    (r"access your (contacts|calendar|photos|reminders)",
+     lambda m: "acessar " + {"contacts": "seus contatos", "calendar": "seu calendário",
+                             "photos": "suas fotos", "reminders": "seus lembretes"}[m.group(1).lower()]),
+]
+ASPAS = "“”\"‘’'«»"
+_RE_BOTOES = re.compile(r"\b(don.?t|deny)\b.*\ballow\b|\ballow\b.*\b(don.?t|deny)\b", re.I)
+_RE_FRASE = re.compile(r"would like to|wants? to|\ballow\s+[%s].+[%s]\s+to\b" % (ASPAS, ASPAS), re.I)
+_RE_PEDIDO = [
+    re.compile(r"[%s](?P<app>[^%s]{1,40})[%s]\s+(?:would like to|wants? to)\s+(?P<acao>.+?)[.?!]?\s*$" % (ASPAS, ASPAS, ASPAS), re.I),
+    re.compile(r"\ballow\s+[%s](?P<app>[^%s]{1,40})[%s]\s+to\s+(?P<acao>.+?)[.?!]?\s*$" % (ASPAS, ASPAS, ASPAS), re.I),
+    re.compile(r"(?:would like to|wants? to)\s+(?P<acao>.+?)[.?!]?\s*$", re.I),
+]
+
+
+def idioma():
+    v = (os.environ.get("POPUP_VIGIA_LANG") or load_config().get("LANG") or "en").strip().lower()
+    return "pt" if v.startswith("pt") else "en"
+
+
+def pedido(texto):
+    """(app, action) from the OCR text of the window, or (None, None). Uses only the request sentence nearest
+    to the button row, so background text read through the translucent dialog does not leak in."""
+    linhas = [l.strip() for l in (texto or "").split("\n") if l.strip()]
+    fim = next((i for i, l in reversed(list(enumerate(linhas))) if _RE_BOTOES.search(l)), len(linhas))
+    i = next((i for i in range(fim - 1, -1, -1) if _RE_FRASE.search(linhas[i])), None)
+    if i is None:
+        return None, None
+    frase = linhas[i]
+    if not re.search(r"[.?!]$", frase) and i + 1 < fim:      # the sentence wrapped onto the next line
+        frase += " " + linhas[i + 1]
+    for rx in _RE_PEDIDO:
+        m = rx.search(frase)
+        if m:
+            app = (m.groupdict().get("app") or "").strip()
+            app = re.sub(r"\.app$", "", app, flags=re.I).strip() or None
+            return app, m.group("acao").strip()[:100]
+    return None, None
+
+
+def o_que(texto, lang):
+    """Short plain description of the request in a window, or a generic phrase when nothing clean is found."""
+    app, acao = pedido(texto)
+    if not acao:
+        return NADA[lang]
+    quem = '"%s"' % app if app else APP_ANON[lang]
+    if lang == "pt":
+        for rx, f in ACOES_PT:
+            m = re.search(rx, acao, re.I)
+            if m:
+                return "%s %s %s" % (quem, QUERO[lang], f(m))
+        return "%s %s %s" % (quem, PEDE[lang], acao)
+    return "%s %s %s" % (quem, QUERO[lang], acao)
+
+
+def monta(chave, texto=None, lang=None, **kw):
+    """Build the notice text for `chave` (see MSGS) in the configured language."""
+    lang = lang or idioma()
+    if chave in ("nao-suportada", "bloqueada"):
+        kw["what"] = o_que(texto, lang)
+        if chave == "bloqueada" and kw["what"] == NADA[lang]:
+            kw["what"] = {"en": "a window that may erase or reset something",
+                          "pt": "uma janela que pode apagar ou redefinir algo"}[lang]
+    return MSGS[chave][lang].format(**kw)
 
 
 # ---------- what the system says ----------
@@ -449,10 +570,10 @@ def trata_janela(w, tentativas, sem_repetir):
     wid = str(w["id"])
     if w["id"] in sem_repetir:
         rodada_log("window %s: the last action has no known result; not repeating" % wid)
-        avisa("sem-resultado", "popup-vigia: I clicked a permission window and do not know the result. Look at the Mac screen.")
+        avisa("sem-resultado", monta("sem-resultado"))
         return
     if tentativas.get(wid, 0) >= MAX_TENTATIVAS:
-        avisa("teimosa", "popup-vigia: tried %d times and the permission window is still on screen. Look at the Mac." % MAX_TENTATIVAS)
+        avisa("teimosa", monta("teimosa", n=MAX_TENTATIVAS))
         return
     ts = telas()
     cx, cy = w["box"][0] + w["box"][2] / 2, w["box"][1] + w["box"][3] / 2
@@ -494,14 +615,13 @@ def trata_janela(w, tentativas, sem_repetir):
         tentativas[wid] = MAX_TENTATIVAS             # do not try this window again
         rodada_log("window %s: BLOCKED (forbidden word), did not click; text: %s"
                    % (wid, " / ".join(texto.split("\n"))[:200]))
-        avisa("bloqueada", "popup-vigia: there is a window I NEVER click (it mentions reset/keychain). "
-                           "Do not press Reset To Defaults. Text: %s" % texto[:300])
+        avisa("bloqueada", monta("bloqueada", texto))
         return
     if botao is None:
         journal(dict(base, fase="nao-suportada", nota="system window without the button pair I know; not clicked"))
         tentativas[wid] = tentativas.get(wid, 0) + 1
         rodada_log("window %s: do not know how to click it; text: %s" % (wid, " / ".join(texto.split("\n"))[:200]))
-        avisa("nao-suportada", "popup-vigia: there is a system window I do not know how to click. Text: %s" % texto[:300])
+        avisa("nao-suportada", monta("nao-suportada", texto))
         return
     fbx, fby = alvo[0] / s + ox, alvo[1] / s + oy     # fixed coordinate for this action (does not depend on a later photo)
     ptx, pty = pt[0] + (fbx - fb[0]) / k, pt[1] + (fby - fb[1]) / k
@@ -511,7 +631,7 @@ def trata_janela(w, tentativas, sem_repetir):
                      pedidos_presos_antes=load_json(C_STATE, {}).get("antigos")))
     except OSError as e:
         rodada_log("window %s: could NOT write the journal (%s); did not click" % (wid, e))
-        avisa("registro", "popup-vigia: cannot write the click journal (%s). Stopped clicking." % e)
+        avisa("registro", monta("registro", erro=e, pasta=LOGDIR))
         return
     tentativas[wid] = tentativas.get(wid, 0) + 1
     if os.environ.get("POPUP_VIGIA_MORRE_APOS_REGISTRO"):     # tests only
@@ -551,8 +671,7 @@ def trata_janela(w, tentativas, sem_repetir):
         else:
             journal({"id": aid, "quando": stamp(), "fase": "clique-incerto", "rc": rc, "motivo": msg[:300]})
             rodada_log("window %s: click UNCERTAIN (it may have arrived), not repeating: rc=%s %s" % (wid, rc, msg[:200]))
-            avisa("sem-resultado", "popup-vigia: tried to click a permission window, got an error and do not know if the click arrived. "
-                                   "Look at the Mac screen and run: popup-vigia reset")
+            avisa("sem-resultado", monta("sem-resultado-erro"))
         return
     journal({"id": aid, "quando": stamp(), "fase": "enviado"})
     # 4) result: did the window close? (from the window list, not from text)
@@ -622,10 +741,10 @@ def rodada():
                        % (tipo, idade // 60, venc[hoje], TRAVA_MAX_DIA))
     for trava in ("UNLOCK-FAILED", "RELOCK-FAILED"):
         if os.path.exists("%s/%s" % (ST, trava)):
-            avisa("trava", "popup-vigia is stopped (%s). On the Mac, run: popup-vigia reset" % trava, cada=6 * 3600)
+            avisa("trava", monta("trava", motivo=MSGS["trava-" + trava][idioma()]), cada=6 * 3600)
             return
     if not os.access(MR, os.X_OK):
-        avisa("mr", "popup-vigia: the mac-remote executable is missing (%s)." % MR, cada=6 * 3600)
+        avisa("mr", monta("mr", mr=MR), cada=6 * 3600)
         return
     bloqueada = tela_bloqueada()
     alvo = janelas_de_permissao(janelas())
@@ -634,7 +753,7 @@ def rodada():
     if not alvo and not (bloqueada and presos >= 1):
         if presos >= 1 and not bloqueada:
             rodada_log("%d stuck request(s) and no known permission window on screen" % presos)
-            avisa("sem-janela", "popup-vigia: %d permission request(s) unanswered and I do not see the window. Look at the Mac." % presos)
+            avisa("sem-janela", monta("sem-janela", n=presos))
         return
     if humano_ativo():
         return                                       # a person is at the Mac: they answer it themselves
@@ -656,15 +775,14 @@ def rodada():
             if rc != 0 or tela_bloqueada():
                 open(ST + "/UNLOCK-FAILED", "w").write("%s %s\n" % (stamp(), (err.strip() or out.strip())[:300]))
                 rodada_log("could NOT unlock: %s" % (err.strip() or out.strip())[:200])
-                avisa("unlock", "popup-vigia: could not unlock the screen (%d stuck requests). Stopped trying. "
-                                "Look at the Mac and run: popup-vigia reset" % presos, cada=0)
+                avisa("unlock", monta("unlock", n=presos), cada=0)
                 return
             desbloqueei = True
             time.sleep(2.0)
             alvo = janelas_de_permissao(janelas())
             if not alvo:
                 rodada_log("unlocked (%d stuck) and there is no known permission window" % presos)
-                avisa("sem-janela", "popup-vigia: %d permission request(s) unanswered and I do not see the window. Look at the Mac." % presos)
+                avisa("sem-janela", monta("sem-janela", n=presos))
         vistas = set()
         while alvo and len(vistas) < MAX_JANELAS:
             vistas.add(alvo[0]["id"])
@@ -688,7 +806,7 @@ def rodada():
             else:
                 open(ST + "/RELOCK-FAILED", "w").write(stamp() + "\n")
                 rodada_log("could NOT lock the screen again (the watchdog tries within %d s)" % CAO)
-                avisa("relock", "popup-vigia: unlocked the screen and could NOT lock it again. Look at the Mac.", cada=0)
+                avisa("relock", monta("relock", min=CAO // 60 + 1), cada=0)
         elif tentei:
             # The unlock failed or timed out. The mac-remote session (holder) may finish unlocking LATER.
             # So: send lock (that also ends the holder) and remove the watchdog only with both proofs:

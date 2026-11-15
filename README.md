@@ -183,7 +183,7 @@ Run it with the mac-remote virtualenv Python (it needs Quartz and Pillow):
 
 Optional `~/.config/popup-vigia/config` (`KEY=VALUE` lines): `NOTIFY_CMD` (a command run as
 `command "<message>"` to notify you; default none, messages go to `rodadas.log`), `NOTIFY_OK` (text the
-command must print to count as delivered), `TESSERACT` (path). Other commands: `log [N]`, `reset`,
+command must print to count as delivered), `LANG` (`en` default, or `pt`: language of the notices), `TESSERACT` (path). Other commands: `log [N]`, `reset`,
 `sync-config` (copies the mac-remote config out of a synced folder, so launchd does not trigger a
 permission popup while reading it).
 
