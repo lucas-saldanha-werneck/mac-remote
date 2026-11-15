@@ -98,6 +98,38 @@ class ReadButtons(unittest.TestCase):
         text, botao, alvo, bloq = pv.ler_botoes(path, box)
         self.assertTrue(bloq, text)
 
+    def _wide_card(self, extra, bg_text_x=330):
+        """The dialog is narrower than the window box: background text sits to the right of the button row
+        (15/11: 'Don't Allow Allow Restart rela' from the Claude app behind a translucent popup)."""
+        path, _ = card(['"Grok Bot.app" would like to', 'access files in your Desktop folder.'], ["Don't Allow", 'Allow'],
+                       size=(300, 300))
+        base = Image.open(path)
+        im = Image.new('RGB', (520, 300), (40, 40, 44))
+        im.paste(base, (0, 0))
+        d = ImageDraw.Draw(im)
+        by = int(300 * 0.78)
+        d.text((bg_text_x, by - 8), extra, fill=(230, 230, 230), font=ImageFont.truetype(FONT, 14))
+        im.save(path)
+        return path, [0, 0, 520, 300]
+
+    def test_background_words_beside_the_dialog_do_not_hide_the_buttons(self):
+        path, box = self._wide_card('Restart relay listener')
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertIn('Restart', text)
+        self.assertEqual(botao, 'Allow', text)
+        self.assertLess(alvo[0], 300)                # the click lands on the dialog's Allow, not on the background
+        self.assertIsNone(bloq, text)
+
+    def test_forbidden_word_in_the_background_row_still_blocks(self):
+        path, box = self._wide_card('Reset')
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertTrue(bloq, text)
+
+    def test_word_glued_to_allow_is_not_the_pair(self):
+        path, box = card(['Some title', 'Some body text.'], ["Don't Allow", 'Allow Once'])
+        text, botao, alvo, bloq = pv.ler_botoes(path, box)
+        self.assertIsNone(botao, text)
+
     def test_sentence_quoting_the_words_is_not_the_button_row(self):
         path, box = card(['Notice', "Tap Don't Allow or Allow when asked to continue."], ['Close'])
         text, botao, alvo, bloq = pv.ler_botoes(path, box)

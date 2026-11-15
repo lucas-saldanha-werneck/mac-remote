@@ -114,10 +114,10 @@ IDLE_MIN = 120          # s with nobody touching the Mac
 MAX_JANELAS = 5         # per round
 MAX_TENTATIVAS = 3      # per window, across rounds
 FOTO_VALIDADE = 12.0    # s between the photo and the click (measured: photo + read = 5.6 s on the author's Mac)
-PRAZO_RODADA = 170      # s
-PRAZO_UNLOCK = int(os.environ.get("POPUP_VIGIA_PRAZO_UNLOCK") or 75)   # s (the variable is for tests only)
+PRAZO_RODADA = 230      # s: whole round (covers the watchdog CAO)
+PRAZO_UNLOCK = int(os.environ.get("POPUP_VIGIA_PRAZO_UNLOCK") or 120)  # s (the variable is for tests only)
 LEASE = 90              # s: mac-remote locks the screen by itself after this long without commands
-CAO = 130               # s: forced lock, whatever happens
+CAO = 185               # s: forced lock, whatever happens (starts before the unlock: PRAZO_UNLOCK + margin)
 JOURNAL_MAX = 5 * 1024 * 1024
 IMG_MAX = 200 * 1024 * 1024
 IMG_DIAS = 90
@@ -386,9 +386,19 @@ def ler_botoes(img_path, caixa):
         # The line must BE the button row, not a sentence in the window body that quotes the words.
         # Measured on 7 real windows: line = "Don't Allow Allow", Allow button at 64% of the width and
         # 69% of the height of the window.
-        resto = [i for i in range(len(toks)) if i not in usados]
-        if len(resto) != 1 or toks[resto[0]] not in AFIRMATIVOS:
+        # The window box can be bigger than the dialog and the dialog is translucent, so OCR may add words
+        # from the screen behind it ("Don't Allow Allow Restart rela", 15/11). Words that sit far from the
+        # pair (a gap of at least 2 text heights; normal word spacing is under 1) are not part of the row.
+        a = max(usados) + 1                          # the accept button comes right after the refuse one
+        if a >= len(toks) or toks[a] not in AFIRMATIVOS:
             continue                                 # other words on the line: it is text, not the button row
+        h = max(ps[a]["h"], 1)
+        if a + 1 < len(toks) and ps[a + 1]["x"] - (ps[a]["x"] + ps[a]["w"]) < 2 * h:
+            continue                                 # a word glued to the accept button ("Allow Once"): not the pair
+        e = min(usados)
+        if e > 0 and ps[e]["x"] - (ps[e - 1]["x"] + ps[e - 1]["w"]) < 2 * h:
+            continue                                 # a word glued to the refuse button: not the pair
+        resto = [a]
         p = ps[resto[0]]
         recusa_x = max(ps[i]["x"] + ps[i]["w"] for i in usados)
         if p["x"] < recusa_x:
