@@ -568,6 +568,18 @@ def mata_cao(cao):
             pass
 
 
+def trava_transitoria(msg):
+    """Kind of a transient UNLOCK-FAILED lock ("connection drop" or "timeout"), or None if it must stay locked.
+    A refused password never expires."""
+    if "refused" in msg:
+        return None
+    if "connect/login failed" in msg:
+        return "connection drop"
+    if "timeout of" in msg and "exceeded" in msg:
+        return "timeout"
+    return None
+
+
 def rodada():
     use_local_mr_config()
     os.makedirs(ST, mode=0o700, exist_ok=True)
@@ -578,8 +590,8 @@ def rodada():
     except OSError:
         return
     signal.alarm(PRAZO_RODADA)
-    # An unlock lock caused by a CONNECTION DROP (not a wrong password) expires by itself after TRAVA_VENCE s,
-    # at most TRAVA_MAX_DIA times a day. A refused password ("login refused") stays locked until reset.
+    # An unlock lock caused by a CONNECTION DROP or a TIMEOUT of the unlock call (not a wrong password) expires
+    # by itself after TRAVA_VENCE s, at most TRAVA_MAX_DIA times a day (both kinds share the cap). A refused password ("login refused") stays locked until reset.
     # Reason: a VNC drop (IncompleteReadError) once left the watcher stopped for about an hour.
     uf = ST + "/UNLOCK-FAILED"
     if os.path.exists(uf):
@@ -590,14 +602,14 @@ def rodada():
             msg, idade = "", 0
         hoje = time.strftime("%Y-%m-%d")
         venc = load_json(ST + "/vencidas.json", {})
-        if ("connect/login failed" in msg and "refused" not in msg and idade >= TRAVA_VENCE
-                and venc.get(hoje, 0) < TRAVA_MAX_DIA):
+        tipo = trava_transitoria(msg)
+        if tipo and idade >= TRAVA_VENCE and venc.get(hoje, 0) < TRAVA_MAX_DIA:
             venc = {hoje: venc.get(hoje, 0) + 1}
             with open(ST + "/vencidas.json", "w") as f:
                 json.dump(venc, f)
             os.remove(uf)
-            rodada_log("UNLOCK-FAILED lock expired (connection drop, %d min); trying again (%d/%d today)"
-                       % (idade // 60, venc[hoje], TRAVA_MAX_DIA))
+            rodada_log("UNLOCK-FAILED lock expired (%s, %d min); trying again (%d/%d today)"
+                       % (tipo, idade // 60, venc[hoje], TRAVA_MAX_DIA))
     for trava in ("UNLOCK-FAILED", "RELOCK-FAILED"):
         if os.path.exists("%s/%s" % (ST, trava)):
             avisa("trava", "popup-vigia is stopped (%s). On the Mac, run: popup-vigia reset" % trava, cada=6 * 3600)
