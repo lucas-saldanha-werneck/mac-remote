@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] - 2026-11-15
+- `popup-vigia`: rewrote every notice as up to 3 short lines (what happened, what the watcher did, what to do, with the exact command such as `popup-vigia reset`). A notice about a window now names the app and the request ("Grok Bot" wants to access files in your Desktop folder) instead of dumping the raw OCR text; when nothing clean is found it says "a permission window". The full OCR text stays in `rodadas.log` and `cliques.jsonl`.
+- `popup-vigia`: new language setting for the notices, `LANG=pt` in `~/.config/popup-vigia/config` (or env `POPUP_VIGIA_LANG`); `en` is the default.
+- `popup-vigia`: the "clicked, result unknown" notice now also tells you to run `popup-vigia reset`.
+
 ## [0.4.4] - 2026-11-15
 - `popup-vigia`: the unlock deadline is 120 s (was 75 s; real unlocks took 74-80 s); the forced-lock watchdog is 185 s and the whole round 230 s, keeping the same margins.
 - `popup-vigia`: a plain "Don't Allow / Allow" popup is clicked even when OCR adds words from the screen behind the translucent dialog on the same line (words at least 2 text heights away from the pair are ignored; the forbidden-word block still reads the whole line).
