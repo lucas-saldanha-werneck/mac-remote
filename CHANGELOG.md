@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.10] - 2026-11-21
+- `popup-vigia`: an empty `UNLOCK-FAILED` lock (the round was killed between creating and writing the file, 20/11) never expired and kept the watcher stopped for about 19 h. An empty or unreadable message now counts as a transient lock ("unknown"), with the same 15-minute expiry and daily cap. A refused password still never expires.
+- The lock is written atomically (temp file + rename) and the round log line is written first, so the lock is never empty.
+
 ## [0.4.9] - 2026-11-15
 - Text follows the language of whoever installs the plugin. The heavy-Mac hook message is now in English and tells Claude to ask the user in their language (it was in Portuguese and named the author).
 - `carga-vigia` and `popup-vigia`: when `LANG` is not set, the notice language is the Mac's first language (`pt` if macOS is set to Portuguese, else `en`). Set `LANG` in the config to choose.

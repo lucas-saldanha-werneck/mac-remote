@@ -185,8 +185,23 @@ class UnlockLock(unittest.TestCase):
         self.assertIsNone(pv.trava_transitoria("connect/login failed: login refused"))
         self.assertIsNone(pv.trava_transitoria("timeout of 75s exceeded; password refused"))
 
-    def test_unknown_stays_locked(self):
-        self.assertIsNone(pv.trava_transitoria(""))
+    def test_empty_is_transient_other_text_stays_locked(self):
+        self.assertEqual(pv.trava_transitoria(""), "unknown")
+        self.assertEqual(pv.trava_transitoria("  \n"), "unknown")
+        self.assertIsNone(pv.trava_transitoria("login refused"))
+
+    def test_grava_trava_atomic_never_empty(self):
+        d = tempfile.mkdtemp()
+        old = pv.ST
+        pv.ST = d
+        try:
+            pv.grava_trava("UNLOCK-FAILED", "2026 boom\n")
+            with open(d + "/UNLOCK-FAILED") as f:
+                self.assertEqual(f.read(), "2026 boom\n")
+            self.assertEqual(os.listdir(d), ["UNLOCK-FAILED"])
+        finally:
+            pv.ST = old
+            shutil.rmtree(d)
         self.assertIsNone(pv.trava_transitoria("something else"))
 
 

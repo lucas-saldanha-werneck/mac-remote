@@ -748,14 +748,28 @@ def mata_cao(cao):
 
 def trava_transitoria(msg):
     """Kind of a transient UNLOCK-FAILED lock ("connection drop" or "timeout"), or None if it must stay locked.
+    An empty message (lock written half-way, e.g. the round was killed) is "unknown" and also expires.
     A refused password never expires."""
     if "refused" in msg:
         return None
+    if not msg.strip():
+        return "unknown"
     if "connect/login failed" in msg:
         return "connection drop"
     if "timeout of" in msg and "exceeded" in msg:
         return "timeout"
     return None
+
+
+def grava_trava(nome, texto):
+    """Write a lock file atomically (temp file + rename), so it is never seen empty."""
+    caminho = "%s/%s" % (ST, nome)
+    tmp = "%s.tmp.%d" % (caminho, os.getpid())
+    with open(tmp, "w") as f:
+        f.write(texto)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, caminho)
 
 
 def rodada():
@@ -822,8 +836,9 @@ def rodada():
             tentei = True
             rc, out, err = run([MR, "unlock", "--idle-timeout", str(LEASE)], PRAZO_UNLOCK)
             if rc != 0 or tela_bloqueada():
-                open(ST + "/UNLOCK-FAILED", "w").write("%s %s\n" % (stamp(), (err.strip() or out.strip())[:300]))
-                rodada_log("could NOT unlock: %s" % (err.strip() or out.strip())[:200])
+                motivo = (err.strip() or out.strip())[:300] or "unlock failed (rc=%s, no output)" % rc
+                rodada_log("could NOT unlock: %s" % motivo[:200])
+                grava_trava("UNLOCK-FAILED", "%s %s\n" % (stamp(), motivo))
                 avisa("unlock", monta("unlock", n=presos), cada=0)
                 return
             desbloqueei = True
